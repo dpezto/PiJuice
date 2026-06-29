@@ -15,6 +15,10 @@ import sys
 import urwid
 from pijuice import PiJuice, pijuice_hard_functions, pijuice_sys_functions, pijuice_user_functions
 
+# Buttons render with [ label ] instead of urwid's default < label >.
+urwid.Button.button_left = urwid.Text("[")
+urwid.Button.button_right = urwid.Text("]")
+
 BUS = 1
 ADDRESS = 0x14
 PID_FILE = '/run/pijuice/pijuice_sys.pid'
@@ -189,19 +193,32 @@ def validate_value(text, type, min, max, old):
 
 
 def confirmation_dialog(text, next, nextno='', single_option=True):
+    global _in_dialog, _dialog_cancel
+    def done(cb, *bound):
+        # Wrap a dialog callback so it clears the dialog flag before running.
+        def inner(*a):
+            global _in_dialog
+            _in_dialog = False
+            return cb(*(bound if bound else a))
+        return inner
     elements = [urwid.Padding(urwid.Text(text), align='center', width='pack'),
                 urwid.Divider()]
     if single_option:
-        elements.append(urwid.Padding(attrmap(urwid.Button("OK", on_press=next)), align='center', width=6))
+        ok = done(next)
+        elements.append(urwid.Padding(attrmap(urwid.Button("OK", on_press=ok)), align='center', width=6))
+        _dialog_cancel = lambda: ok(None)
     else:
         yes_btn = urwid.Button("Yes")
         no_btn  = urwid.Button("No")
-        pad_yes_btn = urwid.Padding(attrmap(yes_btn), width=7)
-        pad_no_btn  = urwid.Padding(attrmap(no_btn), width=7)
-        urwid.connect_signal(yes_btn, 'click', next, True)
-        urwid.connect_signal(no_btn, 'click', nextno, False)
-        elements.extend([pad_yes_btn, pad_no_btn])
+        yes = done(next, None, True)
+        no  = done(nextno, None, False)
+        urwid.connect_signal(yes_btn, 'click', lambda b: yes())
+        urwid.connect_signal(no_btn, 'click', lambda b: no())
+        row = urwid.Columns([(7, attrmap(yes_btn)), (6, attrmap(no_btn))], dividechars=2)
+        elements.append(urwid.Padding(row, align='center', width=15))  # ←/→ or h/l to pick
+        _dialog_cancel = lambda: no()
 
+    _in_dialog = True
     main.original_widget = urwid.Filler(urwid.Pile(elements))
 
 class StatusTab(object):
@@ -525,7 +542,7 @@ class GeneralTab(object):
                              "Do you want to proceed?", single_option=False, next=self._reset_settings, nextno=main_menu))), width=20),
                          urwid.Padding(attrmap(urwid.Button('Back', on_press=main_menu)), width=20)
                          ])
-        main.original_widget = urwid.Padding(urwid.ListBox(urwid.SimpleFocusListWalker(elements)), width=48)
+        main.original_widget = urwid.Padding(CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=48)
         
     def _list_options(self, button, data):
         body = [urwid.Text(data['title']), urwid.Divider()]
@@ -536,7 +553,7 @@ class GeneralTab(object):
         self.bgroup[self.current_config[data['key']]].toggle_state()
         body.extend([urwid.Divider(),
                      urwid.Padding(urwid.Button('Back', on_press=self._set_option, user_data=data), width=8)])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(body))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
     
     def _set_option(self, button, data):
         states = [c.state for c in self.bgroup]
@@ -626,7 +643,7 @@ class LEDTab(object):
                          attrmap(urwid.Button("Refresh", on_press=self._refresh_settings)),
                          attrmap(urwid.Button("Back", on_press=main_menu)),
                          ])
-        main.original_widget = urwid.Padding(urwid.ListBox(urwid.SimpleFocusListWalker(elements)), width=18)
+        main.original_widget = urwid.Padding(CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=18)
     
     def configure_led(self, button, index):
         elements = [urwid.Text("LED " + self.LED_NAMES[index]), urwid.Divider()]
@@ -724,7 +741,7 @@ class ButtonsTab(object):
         elements.extend([urwid.Padding(attrmap(urwid.Button("Refresh", on_press=self._refresh_settings)), width=11),
                          urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=11),
                          ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
     
     def configure_sw(self, button, sw_id):
         elements = [urwid.Text("Settings for " + sw_id), urwid.Divider()]
@@ -734,7 +751,7 @@ class ButtonsTab(object):
                 action=action, function=parameters['function'], parameter=parameters['parameter']),
                 on_press=self.configure_action, user_data={'sw_id': sw_id, 'action': action})))
         elements += [urwid.Divider(), urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=8)]
-        main.original_widget = urwid.Padding(urwid.ListBox(
+        main.original_widget = urwid.Padding(CyclingListBox(
             urwid.SimpleFocusListWalker(elements)), width=46)
     
     def configure_action(self, button, data):
@@ -757,7 +774,7 @@ class ButtonsTab(object):
                     paramline,
                     urwid.Divider(),
                     back_btn]
-        main.original_widget = urwid.Padding(urwid.ListBox(
+        main.original_widget = urwid.Padding(CyclingListBox(
             urwid.SimpleFocusListWalker(elements)), width=37)
     
     def _refresh_settings(self, *args):
@@ -776,7 +793,7 @@ class ButtonsTab(object):
         self.bgroup[self.FUNCTIONS.index(self.current_config[sw_id][action]['function'])].toggle_state()
         body.extend([urwid.Divider(),
                      urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_function_chosen, user_data=data)), width=8)])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(body))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
     
     def _on_function_chosen(self, button, data):
         states = [c.state for c in self.bgroup]
@@ -847,7 +864,7 @@ class IOTab(object):
                                        width=18),
                          urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
                         ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
     
     def configure_io(self, button, pin_id):
         global current_fw_version
@@ -908,7 +925,7 @@ class IOTab(object):
         elements += [urwid.Divider(),
                      urwid.Padding(attrmap(urwid.Button("Apply", on_press=self._apply_settings, user_data=pin_id)), width=9),
                      urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=9)]
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
     
     def check_value(self, pin_id, var_name, type, var_min, var_max, widget, text):
         newval = validate_value(text, type, var_min, var_max, self.current_config[pin_id][var_name])
@@ -928,7 +945,7 @@ class IOTab(object):
                          urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_mode_selected, user_data=pin_id)),
                                        width=8)
                         ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
     
     def _on_mode_selected(self, button, pin_id):
         states = [c.state for c in self.bgroup]
@@ -955,7 +972,7 @@ class IOTab(object):
                          urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_pull_selected, user_data=pin_id)),
                                        width=8)
                         ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
     
     def _on_pull_selected(self, button, pin_id):
         states = [c.state for c in self.bgroup]
@@ -975,7 +992,7 @@ class IOTab(object):
                          urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_wakeup_selected, user_data=pin_id)),
                                        width=8)
                         ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def _on_wakeup_selected(self, button, pin_id):
         states = [c.state for c in self.bgroup]
@@ -1054,7 +1071,7 @@ class BatteryProfileTab(object):
                              urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
                              ])
 
-            main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+            main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
             return
 
         self.param_edits = [
@@ -1148,7 +1165,7 @@ class BatteryProfileTab(object):
             urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18),
         ])
 
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
     
     def refresh(self, *args):
         global current_fw_version
@@ -1234,7 +1251,7 @@ class BatteryProfileTab(object):
         self.bgroup[self.BATTERY_PROFILES.index(self.profile_name)].toggle_state()
         body.extend([urwid.Divider(),
                      urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_profile)), width=8)])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(body))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
     
     def _set_profile(self, *args):
         states = [c.state for c in self.bgroup]
@@ -1251,7 +1268,7 @@ class BatteryProfileTab(object):
         self.bgroup[self.temp_sense_profile_idx].toggle_state()
         body.extend([urwid.Divider(),
                      urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_sense)), width=8)])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(body))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def select_rsoc_estimate(self, *args):
         body = [urwid.Text("Select Rsoc estimation"), urwid.Divider()]
@@ -1262,7 +1279,7 @@ class BatteryProfileTab(object):
         self.bgroup[self.rsoc_estimation_profile_idx].toggle_state()
         body.extend([urwid.Divider(),
                      urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_rsoc_estimation)), width=8)])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(body))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def select_chemistry(self, *args):
         body = [urwid.Text("Select Chemistry"), urwid.Divider()]
@@ -1273,7 +1290,7 @@ class BatteryProfileTab(object):
         self.bgroup[self.chemistries_idx].toggle_state()
         body.extend([urwid.Divider(),
                      urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_chemistry)), width=8)])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(body))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def _set_sense(self, *args):
         states = [c.state for c in self.bgroup]
@@ -1589,7 +1606,7 @@ class WakeupAlarmTab(object):
             urwid.Padding(attrmap(urwid.Button("Set alarm", on_press=self._set_alarm)), width=13),
             urwid.Padding(attrmap(urwid.Button("Back", on_press=self._goto_main_menu)), width=13)
         ]
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
         self.alarm_handle = loop.set_alarm_in(1, self._update_time)
 
     def _goto_main_menu(self, *args):
@@ -1747,7 +1764,7 @@ class SystemTaskTab(object):
                          urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)), width=18),
                          urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
                          ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def refresh(self, *args):
         global pijuiceConfigData
@@ -1896,7 +1913,7 @@ class SystemEventsTab(object):
                          urwid.Padding(attrmap(urwid.Button('Apply settings', on_press=savePiJuiceConfig)), width=18),
                          urwid.Padding(attrmap(urwid.Button('Back', on_press=main_menu)), width=18)
                          ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def refresh(self, *args):
         global pijuiceConfigData
@@ -1922,13 +1939,75 @@ class SystemEventsTab(object):
         elements.extend([urwid.Divider(),
                          urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_function_chosen, user_data=index)), width=8)
                         ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def _on_function_chosen(self, button, index):
         states = [c.state for c in self.bgroup]
         pijuiceConfigData['system_events'][self.EVENTS[index]]['function']=self.functions[states.index(True)]
         self.bgroup=[]
         self.main()
+
+class FileNavigator(object):
+    """Filesystem picker shown over the current view; selecting a file calls
+    on_pick(path). Navigates with the usual keys (CyclingListBox); Cancel/back
+    aborts. ponytail: fills the bare path -- a USER_FUNC may be a full shell
+    command, so any args are dropped; edit them in after picking."""
+    def __init__(self, start, on_pick):
+        self.on_pick = on_pick
+        self.prev = main.original_widget
+        self.prev_back = _current_back
+        self.prev_loc = _location
+        start_dir = start if os.path.isdir(start) else os.path.dirname(start)
+        self.cur = '/'
+        for cand in (start_dir, '/usr/local/bin', os.path.expanduser('~'), '/'):
+            if cand and os.path.isdir(cand):
+                self.cur = cand
+                break
+        self.show()
+
+    def show(self):
+        elements = [urwid.Text("Select script  [" + self.cur + "]"), urwid.Divider(),
+                    attrmap(urwid.Button('../', on_press=self._go, user_data='..'))]
+        try:
+            entries = sorted(os.scandir(self.cur), key=lambda e: (not e.is_dir(), e.name.lower()))
+        except OSError:
+            entries = []
+        for e in entries:
+            try:
+                is_dir = e.is_dir()
+            except OSError:
+                is_dir = False
+            elements.append(attrmap(urwid.Button(e.name + ('/' if is_dir else ''),
+                                                  on_press=self._go, user_data=e.name)))
+        elements.extend([urwid.Divider(),
+                         urwid.Padding(attrmap(urwid.Button('Cancel', on_press=self._cancel)), width=10)])
+        main.original_widget = urwid.Padding(
+            CyclingListBox(urwid.SimpleFocusListWalker(elements)), left=1, right=1)
+
+    def _go(self, button, name):
+        path = os.path.normpath(os.path.join(self.cur, name))
+        if os.path.isdir(path):
+            self.cur = path
+            self.show()
+        else:
+            _restore_view(self.prev, self.prev_back, self.prev_loc)
+            self.on_pick(path)
+
+    def _cancel(self, *args):
+        _restore_view(self.prev, self.prev_back, self.prev_loc)
+
+
+class ScriptEdit(urwid.Edit):
+    """Edit whose Enter opens the file picker (vim normal: l -> enter)."""
+    _on_browse = None
+    def set_on_browse(self, cb):
+        self._on_browse = cb
+    def keypress(self, size, key):
+        if key == 'enter' and self._on_browse:
+            self._on_browse()
+            return None
+        return super().keypress(size, key)
+
 
 USER_FUNCS_TOTAL=15
 class UserScriptsTab(object):
@@ -1946,15 +2025,16 @@ class UserScriptsTab(object):
 
     def main(self, *args):
         global pijuiceConfigData
-        elements = [urwid.Text("User Scripts"),
+        elements = [urwid.Text("User Scripts  (Enter on a slot to browse for a script)"),
                     urwid.Divider()
         ]
 
         for i in range(USER_FUNCS_TOTAL):
             flabel = 'USER FUNC' + str(i+1) + ': '
             fkey = 'USER_FUNC' + str(i+1)
-            edititem = urwid.Edit(flabel, edit_text=pijuiceConfigData['user_functions'][fkey])
+            edititem = ScriptEdit(flabel, edit_text=pijuiceConfigData['user_functions'][fkey])
             urwid.connect_signal(edititem, 'change', self.updatetext, user_args = [fkey,])
+            edititem.set_on_browse(lambda e=edititem, k=fkey: self._browse(k, e))
             elements.append(attrmap(edititem))
         elements.append(urwid.Divider())
 
@@ -1963,33 +2043,105 @@ class UserScriptsTab(object):
                          urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)), width=18),
                          urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
                          ])
-        main.original_widget = urwid.ListBox(urwid.SimpleFocusListWalker(elements))
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def updatetext(self,  key, widget, text):
         global pijuiceConfigData
         pijuiceConfigData['user_functions'][key] = text
+
+    def _browse(self, fkey, edititem):
+        FileNavigator(pijuiceConfigData['user_functions'].get(fkey, ''),
+                      lambda path: edititem.set_edit_text(path))
 
     def refresh(self, *args):
         global pijuiceConfigData
         pijuiceConfigData = loadPiJuiceConfig()
         self.main()
 
+
+class SettingsTab(object):
+    def __init__(self, *args):
+        global pijuiceConfigData
+        if pijuiceConfigData is None:
+            pijuiceConfigData = loadPiJuiceConfig()
+        self.main()
+
+    def main(self, *args):
+        global pijuiceConfigData
+        cli = pijuiceConfigData.setdefault('cli_settings', {})
+        elements = [urwid.Text("Settings"), urwid.Divider(),
+                    attrmap(urwid.CheckBox("Enable vim keybindings",
+                                           state=cli.get('vim_keys', False),
+                                           on_state_change=self._toggle_vim)),
+                    urwid.Divider(),
+                    urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)), width=18),
+                    urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18),
+                    ]
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
+
+    def _toggle_vim(self, checkbox, state):
+        # Live toggle; persist on Apply (mark dirty so Back warns if not applied).
+        global VIM_ENABLED, pijuiceConfigData
+        pijuiceConfigData.setdefault('cli_settings', {})['vim_keys'] = state
+        VIM_ENABLED = state
+        _mark_dirty()
+        _update_title()
+
+
+class CyclingListBox(urwid.ListBox):
+    """ListBox that wraps focus around at the top/bottom edges (README TODO).
+
+    urwid's ListBox.keypress returns the motion key unchanged when it can't move
+    (i.e. focus is already at an edge). We catch that and jump to the first/last
+    *selectable* row, skipping dividers and static text.
+    """
+
+    def keypress(self, size, key):
+        # gg/G (mapped to home/end) land on the first/last *selectable* row so
+        # the highlight never lands on the non-selectable title.
+        if key == 'home':
+            self._focus_edge(from_top=True)
+            return None
+        if key == 'end':
+            self._focus_edge(from_top=False)
+            return None
+        result = super().keypress(size, key)
+        if result == 'down':
+            self._focus_edge(from_top=True)
+            return None
+        if result == 'up':
+            self._focus_edge(from_top=False)
+            return None
+        return result
+
+    def _focus_edge(self, from_top):
+        count = len(self.body)
+        order = range(count) if from_top else range(count - 1, -1, -1)
+        for i in order:
+            if self.body[i].selectable():
+                self.set_focus(i)
+                return
+
+
 def menu(title, choices):
     _InitPiJuiceInterface()
-    body = [urwid.Text(title), urwid.Divider()]
+    body = [urwid.Divider()]   # location shown in the header now
     for c in choices:
         if c != "":
             button = urwid.Button(c)
             urwid.connect_signal(button, 'click', item_chosen, c)
-            #wrapped_button = urwid.Padding(urwid.AttrMap(button, None, focus_map='reversed'), width=20)
             wrapped_button = urwid.Padding(attrmap(button), width=20)
             body.append(wrapped_button)
         else:
             body.append(urwid.Divider())
-    return urwid.ListBox(urwid.SimpleFocusListWalker(body))
+    return CyclingListBox(urwid.SimpleFocusListWalker(body))
 
 
 def item_chosen(button, choice):
+    global _location, _dirty, _last_choice
+    _location = choice
+    _last_choice = choice
+    _dirty = False
     callback = menu_mapping[choice]
     callback()
 
@@ -2001,14 +2153,26 @@ def not_implemented_yet(*args):
 
 
 def main_menu(*args):
-    main.original_widget = menu("PiJuice HAT Configuration", choices)
+    global _location
+    _location = 'PiJuice HAT Configuration'
+    m = menu("PiJuice HAT Configuration", choices)
+    if _last_choice is not None:                 # land on the item we came from
+        for i, w in enumerate(m.body):
+            b = getattr(w, 'base_widget', w)
+            if isinstance(b, urwid.Button) and b.label == _last_choice:
+                m.set_focus(i)
+                break
+    main.original_widget = m
 
 
 def exit_program(button=None):
     raise urwid.ExitMainLoop()
 
 def attrmap(w):
-    return urwid.AttrMap(w, None, focus_map='reversed')
+    if isinstance(w, urwid.Edit):
+        # Editing a text field marks the view dirty (warn before discarding on back).
+        urwid.connect_signal(w, 'change', _mark_dirty)
+    return urwid.AttrMap(w, 'button', focus_map='button_focus')
 
 def loadPiJuiceConfig():
     try:
@@ -2019,9 +2183,11 @@ def loadPiJuiceConfig():
     return pijuiceConfigData
 
 def savePiJuiceConfig(*args):
+    global _dirty
     try:
         with open(PiJuiceConfigDataPath, 'w+') as outputConfig:
             json.dump(pijuiceConfigData, outputConfig, indent=2)
+        _dirty = False
         ret = notify_service(*args)
         text = "Settings saved"
         if ret != 0:
@@ -2053,13 +2219,269 @@ menu_mapping = {
     "System Task": SystemTaskTab,
     "System Events": SystemEventsTab,
     "User Scripts": UserScriptsTab,
+    "Settings": SettingsTab,
     "Exit": exit_program
 }
 
 # Use list of entries to set order
 choices = ["Status", "General", "Buttons", "LEDs", "Battery profile", "IO", "Wakeup Alarm",
-           "Firmware", "", "System Task", "System Events", "User Scripts", "", "Exit"]
+           "Firmware", "", "System Task", "System Events", "User Scripts", "", "Settings", "Exit"]
 
+# ── navigation state ─────────────────────────────────────────────────────────
+# Each view still builds a "Back"/"Cancel" button as before, but _ContentArea
+# hoists it out of the body into a clickable header. So the button never shows in
+# the body; it fires from go_back() -- the header "back", the Esc key, and a
+# 'left'/'h' that goes unhandled (focus at the left edge) all call it. The action
+# may navigate OR commit a chooser selection (behaviour unchanged). New views get
+# this for free just by keeping a Back/Cancel button.
+_dirty = False            # unapplied text edits in the current view
+_current_back = None      # the hoisted Back/Cancel button of the current view
+_location = ''            # breadcrumb shown in the header
+_last_choice = None       # last main-menu item entered (restore focus on back)
+_suppress_hoist = False   # re-render a view without re-hoisting (dirty cancel)
+_in_dialog = False        # a confirmation_dialog is showing
+_dialog_cancel = None     # Esc action while a dialog is up
+frame = None              # set once the UI is built
+linebox = None
+
+VIM_ENABLED = bool(loadPiJuiceConfig().get('cli_settings', {}).get('vim_keys', False))
+_vim_mode = 'normal'      # 'normal' | 'insert' (only meaningful when VIM_ENABLED)
+_vim_pending_g = False
+_VIM_MOTIONS = {'j': 'down', 'k': 'up', 'h': 'left', 'l': 'right', 'G': 'end',
+                'ctrl f': 'page down', 'ctrl b': 'page up'}
+
+
+def _mark_dirty(*args):
+    global _dirty
+    _dirty = True
+
+
+def _focus_is_editable(widget):
+    """Descend the focus chain; True if the focused leaf is a text Edit."""
+    seen = set()
+    for _ in range(50):
+        if isinstance(widget, urwid.Edit):
+            return True
+        if id(widget) in seen:
+            break
+        seen.add(id(widget))
+        child = None
+        for attr in ('focus', 'original_widget'):
+            candidate = getattr(widget, attr, None)
+            if candidate is not None and candidate is not widget:
+                child = candidate
+                break
+        if child is None:
+            break
+        widget = child
+    return False
+
+
+def _rows_container(widget):
+    """Unwrap decorations until a Pile/ListBox; return (kind, row-list)."""
+    seen = set()
+    while widget is not None and id(widget) not in seen:
+        seen.add(id(widget))
+        if isinstance(widget, urwid.Pile):
+            return 'pile', widget.contents
+        if isinstance(widget, urwid.ListBox):
+            return 'walker', widget.body
+        widget = getattr(widget, 'original_widget', None)
+    return None, None
+
+
+def _hoist_back(widget):
+    """Remove the Back/Cancel row from a freshly built view and return its button,
+    so the frame can drive it from the header / nav keys instead of the body."""
+    kind, rows = _rows_container(widget)
+    if rows is None:
+        return None
+    for i, entry in enumerate(rows):
+        row = entry[0] if kind == 'pile' else entry
+        leaf = getattr(row, 'base_widget', row)
+        if isinstance(leaf, urwid.Button) and leaf.label in ('Back', 'Cancel'):
+            del rows[i]
+            return leaf
+    return None
+
+
+class _ContentArea(urwid.Padding):
+    """Padding whose content swap hoists the view's Back button into the header."""
+    def _set_original_widget(self, widget):
+        back = None if _suppress_hoist else _hoist_back(widget)
+        urwid.WidgetDecoration._set_original_widget(self, widget)
+        if not _suppress_hoist:
+            _on_view_changed(back)
+    original_widget = property(urwid.WidgetDecoration._get_original_widget,
+                               _set_original_widget)
+
+
+def _on_view_changed(back):
+    global _current_back
+    _current_back = back
+    _render_header()
+
+
+class _BareButton(urwid.Button):
+    """Button without the global [ ] chrome -- used for the header back control."""
+    button_left = urwid.Text('')
+    button_right = urwid.Text('')
+
+
+def _render_header():
+    if frame is None:
+        return
+    cols = []
+    if _current_back is not None:
+        back_btn = _BareButton('← back', on_press=go_back)   # arrow cues left/h
+        cols.append((10, urwid.AttrMap(back_btn, 'button', focus_map='button_focus')))
+    cols.append(urwid.AttrMap(urwid.Text(_location), 'title'))
+    frame.header = urwid.Columns(cols, dividechars=1)
+
+
+def _update_title():
+    if linebox is None:
+        return
+    if VIM_ENABLED and _vim_mode == 'insert':
+        linebox.set_title('PiJuice CLI  -- INSERT --')
+    else:
+        linebox.set_title('PiJuice CLI')
+
+
+def go_back(*args):
+    """Fire the current view's Back/Cancel action; warn first on unsaved edits."""
+    if _current_back is None:
+        return
+    if _dirty:
+        # Capture now: showing the dialog resets _current_back via _ContentArea.
+        prev_w, prev_back, prev_loc = main.original_widget, _current_back, _location
+        confirmation_dialog(
+            "Unsaved changes will be lost. Go back?",
+            next=lambda *a: _do_back(prev_back),
+            nextno=lambda *a: _restore_view(prev_w, prev_back, prev_loc),
+            single_option=False)
+        return
+    _do_back(_current_back)
+
+
+def _do_back(btn):
+    global _dirty
+    _dirty = False
+    if btn is not None:
+        urwid.emit_signal(btn, 'click', btn)
+
+
+def _back_or_exit(*args):
+    """Esc: cancel a dialog, else go back, else (at root) quit the CLI."""
+    if _in_dialog:
+        if _dialog_cancel:
+            _dialog_cancel()
+        return
+    if _current_back is None:
+        exit_program()
+    else:
+        go_back()
+
+
+def _restore_view(widget, back, loc):
+    global _suppress_hoist, _current_back, _location
+    _suppress_hoist = True
+    main.original_widget = widget
+    _suppress_hoist = False
+    _current_back = back
+    _location = loc
+    _render_header()
+
+
+def vim_translate(keys, mode, editable, pending_g):
+    """Pure key mapping (no urwid). Returns (out_keys, mode, pending_g, want_insert).
+    h/l/j/k -> left/right/down/up so focus moves (incl. across columns); back is
+    triggered separately when 'left' goes unhandled (focus at the left edge)."""
+    out, want_insert = [], False
+    for key in keys:
+        if mode == 'insert':
+            if key == 'esc':
+                mode = 'normal'
+            else:
+                out.append(key)
+            continue
+        # normal mode
+        if key == 'g':
+            if pending_g:
+                out.append('home'); pending_g = False
+            else:
+                pending_g = True
+            continue
+        pending_g = False
+        if key in ('i', 'a') and editable:
+            want_insert = True; mode = 'insert'
+        elif key in _VIM_MOTIONS:
+            out.append(_VIM_MOTIONS[key])
+        elif editable and len(key) == 1 and key.isprintable():
+            pass  # swallow: normal-mode keys must not get typed into the field
+        else:
+            out.append(key)
+    return out, mode, pending_g, want_insert
+
+
+def input_filter(keys, raw):
+    global _vim_mode, _vim_pending_g
+    editable = _focus_is_editable(loop.widget)
+    out = []
+    for key in keys:
+        # Esc only special in vim insert mode (-> normal); otherwise it falls
+        # through to unhandled_input, which does cancel/back/quit.
+        if key == 'esc' and VIM_ENABLED and _vim_mode == 'insert':
+            _vim_mode = 'normal'; _update_title(); continue
+        if not VIM_ENABLED:
+            out.append(key); continue
+        mapped, _vim_mode, _vim_pending_g, want_insert = vim_translate(
+            [key], _vim_mode, editable, _vim_pending_g)
+        if want_insert:
+            _update_title()
+        out.extend(mapped)
+    return out
+
+
+def unhandled_input(key):
+    # Reached only when no widget consumed the key. 'left' here means focus is at
+    # the left edge (vertical list, or leftmost column) -> go back. Esc -> back/quit.
+    if key == 'left':
+        go_back()
+    elif key == 'esc':
+        _back_or_exit()
+
+
+def _selftest():
+    assert vim_translate(['j'], 'normal', False, False)[0] == ['down']
+    assert vim_translate(['k'], 'normal', False, False)[0] == ['up']
+    assert vim_translate(['h'], 'normal', False, False)[0] == ['left']   # move/back-at-edge
+    assert vim_translate(['l'], 'normal', False, False)[0] == ['right']  # move right (columns)
+    out, m, p, ins = vim_translate(['g'], 'normal', False, False)
+    assert p is True and out == []
+    assert vim_translate(['g'], 'normal', False, True)[0] == ['home']
+    out, m, p, ins = vim_translate(['i'], 'normal', True, False)
+    assert ins is True and m == 'insert' and out == []
+    assert vim_translate(['x'], 'normal', True, False)[0] == []        # swallowed
+    assert vim_translate(['x'], 'insert', True, False)[0] == ['x']     # typed
+    out, m, p, ins = vim_translate(['esc'], 'insert', True, False)
+    assert m == 'normal' and out == []
+    assert vim_translate(['enter'], 'normal', False, False)[0] == ['enter']  # select
+    # _hoist_back removes the Back/Cancel row and returns its button.
+    bb = urwid.Button('Back')
+    pile = urwid.Pile([urwid.Text('t'), urwid.Divider(), urwid.Padding(attrmap(bb), width=8)])
+    assert _hoist_back(urwid.Filler(pile)) is bb and len(pile.contents) == 2
+    lb = CyclingListBox(urwid.SimpleFocusListWalker([urwid.Text('t'), attrmap(urwid.Button('Cancel'))]))
+    assert isinstance(_hoist_back(lb), urwid.Button) and len(lb.body) == 1
+    assert _hoist_back(urwid.Filler(urwid.Pile([urwid.Text('x')]))) is None
+    print('selftest OK')
+
+
+if '--selftest' in sys.argv:
+    _selftest()
+    sys.exit(0)
+
+# ── build UI ─────────────────────────────────────────────────────────────────
 nolock = False
 lock_file = open(LOCK_FILE, 'w')
 try:
@@ -2075,14 +2497,31 @@ if nolock:
                                          align='center')),
                 urwid.Divider()]
     elements.append(urwid.Padding(attrmap(urwid.Button("OK", on_press=exit_cli)), width=6, align='center'))
-    main = urwid.Filler(urwid.Pile(elements))
+    main = _ContentArea(urwid.Filler(urwid.Pile(elements)), left=2, right=2)
 else:
     pijuiceConfigData = None
-    main = urwid.Padding(menu("PiJuice HAT Configuration", choices), left=2, right=2)
+    main = _ContentArea(menu("PiJuice HAT Configuration", choices), left=2, right=2)
+    _location = 'PiJuice HAT Configuration'
 
-top = urwid.Overlay(urwid.LineBox(main, title='PiJuice CLI'), urwid.SolidFill(u'\N{LIGHT SHADE}'),
+# Palette ("better looks" README TODO): coloured, higher-contrast focus.
+PALETTE = [
+    ('reversed',     'standout',           ''),
+    ('title',        'yellow,bold',        ''),
+    ('button',       'light cyan',         ''),
+    ('button_focus', 'black',              'light cyan'),
+    ('error',        'light red,bold',     ''),
+    ('ok',           'light green,bold',   ''),
+    ('line',         'dark cyan',          ''),
+]
+
+frame = urwid.Frame(body=main)
+linebox = urwid.LineBox(frame, title='PiJuice CLI')
+top = urwid.Overlay(linebox, urwid.SolidFill(u'\N{LIGHT SHADE}'),
                     align='center', width=64,
                     valign='middle', height=20)
-loop = urwid.MainLoop(top, palette=[('reversed', 'standout', '')])
+_render_header()
+
+loop = urwid.MainLoop(top, palette=PALETTE, input_filter=input_filter,
+                      unhandled_input=unhandled_input)
 loop.run()
 
