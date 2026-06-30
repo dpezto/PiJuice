@@ -2074,17 +2074,19 @@ class SettingsTab(object):
                                            state=cli.get('vim_keys', False),
                                            on_state_change=self._toggle_vim)),
                     urwid.Divider(),
-                    urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)), width=18),
+                    urwid.Text(('line', "Changes apply immediately.")),
+                    urwid.Divider(),
                     urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18),
                     ]
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def _toggle_vim(self, checkbox, state):
-        # Live toggle; persist on Apply (mark dirty so Back warns if not applied).
+        # Immediate-apply: toggling already activates it live, and it's CLI-only
+        # JSON the service never reads, so persist now — no Apply, no dirty-warning.
         global VIM_ENABLED, pijuiceConfigData
         pijuiceConfigData.setdefault('cli_settings', {})['vim_keys'] = state
         VIM_ENABLED = state
-        _mark_dirty()
+        save_cli_config_quiet()
         _update_title()
 
 
@@ -2197,6 +2199,19 @@ def savePiJuiceConfig(*args):
     except:
         confirmation_dialog("Failed to save settings to " + PiJuiceConfigDataPath + "\n"
                             "Check permissions of " + PiJuiceConfigDataPath, next=main_menu)
+
+def save_cli_config_quiet():
+    # Persist config without notifying the daemon or popping a dialog. For
+    # CLI-only settings (e.g. cli_settings.vim_keys) that apply immediately and
+    # the service never reads, so neither an Apply step nor a SIGHUP is needed.
+    global _dirty
+    try:
+        with open(PiJuiceConfigDataPath, 'w+') as outputConfig:
+            json.dump(pijuiceConfigData, outputConfig, indent=2)
+        _dirty = False
+        return True
+    except Exception:
+        return False
 
 def notify_service(*args):
     ret = -1
@@ -2503,15 +2518,16 @@ else:
     main = _ContentArea(menu("PiJuice HAT Configuration", choices), left=2, right=2)
     _location = 'PiJuice HAT Configuration'
 
-# Palette ("better looks" README TODO): coloured, higher-contrast focus.
+# Palette: cohesive cyan accent, high-contrast focus. First pass -- tweak the
+# accent/colours here; this is the single place that styles the whole CLI.
 PALETTE = [
-    ('reversed',     'standout',           ''),
-    ('title',        'yellow,bold',        ''),
-    ('button',       'light cyan',         ''),
-    ('button_focus', 'black',              'light cyan'),
-    ('error',        'light red,bold',     ''),
-    ('ok',           'light green,bold',   ''),
-    ('line',         'dark cyan',          ''),
+    ('reversed',     'standout',            ''),
+    ('title',        'light cyan,bold',     ''),
+    ('button',       'default',             ''),
+    ('button_focus', 'black',               'light cyan'),
+    ('error',        'light red,bold',      ''),
+    ('ok',           'light green,bold',    ''),
+    ('line',         'dark cyan',           ''),
 ]
 
 frame = urwid.Frame(body=main)

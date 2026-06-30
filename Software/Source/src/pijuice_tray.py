@@ -57,7 +57,11 @@ class PiJuiceTray(object):
         self.refresh_err = 0
 
         self.indicator = AppIndicator.Indicator.new(
-            APP_ID, "battery", AppIndicator.IndicatorCategory.HARDWARE)
+            APP_ID, "pijuice", AppIndicator.IndicatorCategory.HARDWARE)
+        # Resolve our icon basenames from ICON_DIR. Panels load the icon by
+        # IconName + IconThemePath (SNI); passing an absolute path instead made
+        # the panel look up a bare basename in its own theme and find nothing.
+        self.indicator.set_icon_theme_path(ICON_DIR)
         self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
         self.indicator.set_title("PiJuice")
         self.indicator.set_menu(self._build_menu())
@@ -89,12 +93,6 @@ class PiJuiceTray(object):
         return menu
 
     @staticmethod
-    def _icon_path(name):
-        # Absolute path: SNI hosts (incl. wf-panel) load it directly, unlike the
-        # theme-name lookup which needs the non-standard IconThemePath property.
-        return os.path.join(ICON_DIR, name + ".png")
-
-    @staticmethod
     def _icon_name(level, status):
         """Pick an icon basename from charge level + battery/power state."""
         if status is None:
@@ -118,13 +116,13 @@ class PiJuiceTray(object):
             self.refresh_err = 0
         except PiJuiceError:
             self.refresh_err += 1
-            self.indicator.set_icon_full(self._icon_path("connection-error"),
+            self.indicator.set_icon_full("connection-error",
                                          "PiJuice: no connection")
             self.level_item.set_label("No connection")
             if self.refresh_err > 4:
                 Gtk.main_quit()
             return True
-        self.indicator.set_icon_full(self._icon_path(self._icon_name(level, status)),
+        self.indicator.set_icon_full(self._icon_name(level, status),
                                      "%d%%" % level)
         self.level_item.set_label("Charge: %d%%" % level)
         return True  # keep the timer

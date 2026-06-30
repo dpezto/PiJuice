@@ -7,7 +7,7 @@ import os
 #import sys
 
 def set_desktop_entry_versions(version):
-    entries = ("data/pijuice-gui.desktop", "data/pijuice-tray.desktop")
+    entries = ("data/pijuice-gtk.desktop", "data/pijuice-tray.desktop")
     for entry in entries:
         with open(entry, "r") as f:
             lines = f.readlines()
@@ -42,14 +42,14 @@ else:
     name = "pijuice-gui"
     py_modules = None
     data_files= [
-        ('share/applications', ['data/pijuice-gui.desktop', 'data/pijuice-gtk.desktop']),
+        ('share/applications', ['data/pijuice-gtk.desktop']),
         ('/etc/xdg/autostart', ['data/pijuice-tray.desktop']),
-        ('share/pijuice/data/images', glob.glob('data/images/*')), 
-        ('/etc/X11/Xsession.d', ['data/36x11-pijuice_xhost']),
-        ('bin', ['bin/pijuice_gui32']),
-        ('bin', ['bin/pijuice_gui64']),
+        ('share/pijuice/data/images', glob.glob('data/images/*')),
+        # Also drop the tray PNGs into pixmaps so the panel's GtkIconTheme
+        # resolves them by bare name (some SNI hosts ignore IconThemePath).
+        ('share/pixmaps', glob.glob('data/images/*.png')),
     ]
-    scripts = ['src/pijuice_tray.py', 'src/pijuice_gui.py', 'src/pijuice_gtk.py']
+    scripts = ['src/pijuice_tray.py', 'src/pijuice_gtk.py']
     description = "GUI package for PiJuice"
 
 try:

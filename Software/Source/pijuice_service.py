@@ -11,7 +11,7 @@ Responsibilities:
     (resolving ``i2c_addr`` / ``i2c_bus``), degrading gracefully when no HAT is
     present (``service.available is False``) so the module imports anywhere.
   * Consolidate the helpers that were copy-pasted into ``pijuice_cli.py`` and
-    ``pijuice_gui.py``: config load/save and ``notify_service``.
+    ``pijuice_gtk.py``: config load/save and ``notify_service``.
   * Serialise every I2C transfer through a single worker thread so UI callbacks
     never block the event loop and concurrent access can't corrupt the bus.
   * Turn the library's ``{'data': ..., 'error': ...}`` dicts into return values

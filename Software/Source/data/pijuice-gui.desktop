@@ -1,9 +1,0 @@
-[Desktop Entry]
-Version=1.3.3
-Type=Application
-Name=PiJuice Settings
-Exec=/usr/bin/pijuice_gui
-Icon=/usr/share/pijuice/data/images/pijuice.png
-Terminal=false
-Categories=Settings;GTK;
-Comment=Configuration of PiJuice

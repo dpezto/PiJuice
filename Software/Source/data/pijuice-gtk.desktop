@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=PiJuice Settings (GTK4)
+Name=PiJuice Settings
 Exec=/usr/bin/python3 /usr/bin/pijuice_gtk.py
 Icon=/usr/share/pijuice/data/images/pijuice.png
 Terminal=false

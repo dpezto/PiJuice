@@ -40,7 +40,7 @@
 /* CONFIGURATION SECTION */
 
 #ifndef FULL_PATH       /* so that this can be specified from the Makefile */
-#define FULL_PATH       "/usr/bin/pijuice_gui.py"
+#define FULL_PATH       "/usr/bin/pijuice_cli.py"
 //#error "You must define FULL_PATH somewhere"
 #endif
 #ifndef UMASK
