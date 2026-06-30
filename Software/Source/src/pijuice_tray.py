@@ -1,195 +1,169 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
-from __future__ import print_function, division
+"""PiJuice status tray icon (Wayland-native via StatusNotifierItem).
+
+GTK4 has no system-tray API, so this stays on GTK3 + libayatana-appindicator,
+which speaks the StatusNotifierItem D-Bus protocol that the Wayfire panel
+(``wf-panel-pi``) and other Wayland panels understand. It is a separate process
+from the GTK4 settings app and only shares the toolkit-agnostic
+:class:`pijuice_service.PiJuiceService` for I2C + config resolution.
+"""
 
 import os
-import os.path
+import subprocess
 import sys
-from signal import signal, SIGUSR1, SIGUSR2
-import json
+from signal import SIGUSR1, SIGUSR2
+
+# No a11y D-Bus on the Pi; skip the GTK3 atk-bridge to avoid a startup warning.
+os.environ.setdefault("NO_AT_BRIDGE", "1")
+
 import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk as gtk
-from gi.repository import GObject as gobject
-from gi.repository import GLib as glib
 
-from pijuice import PiJuice, get_versions
+gi.require_version("Gtk", "3.0")
+gi.require_version("AyatanaAppIndicator3", "0.1")
+from gi.repository import Gtk, GLib  # noqa: E402
+from gi.repository import AyatanaAppIndicator3 as AppIndicator  # noqa: E402
 
-I2C_ADDRESS_DEFAULT = 0x14
-I2C_BUS_DEFAULT = 1
-REFRESH_INTERVAL = 5000
-CHECK_SIGNAL_INTERVAL = 200
-ICON_DIR = '/usr/share/pijuice/data/images'
-TRAY_PID_FILE = '/run/pijuice/pijuice_tray.pid'
-configPath = '/var/lib/pijuice/pijuice_config.JSON'
+# The service ships as a top-level module; make sure it's importable when this
+# script is run by path (e.g. the desktop autostart entry).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from pijuice_service import PiJuiceService, PiJuiceError  # noqa: E402
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from pijuice_service import PiJuiceService, PiJuiceError
+from pijuice import get_versions  # noqa: E402
 
-class PiJuiceStatusTray(object):
+APP_ID = "pijuice-tray"
+ICON_DIR = "/usr/share/pijuice/data/images"
+REFRESH_INTERVAL = 5000  # ms
+TRAY_PID_FILE = "/run/pijuice/pijuice_tray.pid"
 
+
+def _find_settings_app():
+    """Locate the GTK4 settings script (dev tree or installed)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "pijuice_gtk.py"),
+                 "/usr/bin/pijuice_gtk.py",
+                 "/usr/share/pijuice/pijuice_gtk.py"):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+class PiJuiceTray(object):
     def __init__(self):
-        self.tray = gtk.StatusIcon()
-        self.tray.connect('activate', self.refresh)
-
-        # Create menu
-        self.menu = gtk.Menu()
-
-        i = gtk.MenuItem(label="Settings")
-        self.settings_item = i
-        i.show()
-        i.connect("activate", self.ConfigurePiJuice)
-        self.menu.append(i)
-
-        i = gtk.MenuItem(label="About...")
-        i.show()
-        i.connect("activate", self.show_about)
-        self.menu.append(i)
-
-        self.tray.connect('popup-menu', self.show_menu)
-
-        self.init_pijuice_interface()
-        
-        # Initalise and start battery display
+        self.service = PiJuiceService()
         self.refresh_err = 0
-        self.refresh(None)
-        self.tray.set_visible(True)
 
-        glib.timeout_add(REFRESH_INTERVAL, self.refresh, self.tray)
-        glib.timeout_add(CHECK_SIGNAL_INTERVAL, self.check_signum)
+        self.indicator = AppIndicator.Indicator.new(
+            APP_ID, "battery", AppIndicator.IndicatorCategory.HARDWARE)
+        self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        self.indicator.set_title("PiJuice")
+        self.indicator.set_menu(self._build_menu())
 
-    def init_pijuice_interface(self):
+        self.refresh()
+        GLib.timeout_add(REFRESH_INTERVAL, self.refresh)
+
+    def _build_menu(self):
+        menu = Gtk.Menu()
+        self.level_item = Gtk.MenuItem(label="…")
+        self.level_item.set_sensitive(False)
+        menu.append(self.level_item)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        self.settings_item = Gtk.MenuItem(label="Settings")
+        self.settings_item.connect("activate", self._on_settings)
+        menu.append(self.settings_item)
+
+        about = Gtk.MenuItem(label="About…")
+        about.connect("activate", self._on_about)
+        menu.append(about)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", lambda _w: Gtk.main_quit())
+        menu.append(quit_item)
+
+        menu.show_all()
+        return menu
+
+    @staticmethod
+    def _icon_path(name):
+        # Absolute path: SNI hosts (incl. wf-panel) load it directly, unlike the
+        # theme-name lookup which needs the non-standard IconThemePath property.
+        return os.path.join(ICON_DIR, name + ".png")
+
+    @staticmethod
+    def _icon_name(level, status):
+        """Pick an icon basename from charge level + battery/power state."""
+        if status is None:
+            return "connection-error"
+        battery = status.get("battery", "NORMAL")
+        p_in = status.get("powerInput", "NOT_PRESENT")
+        p_io = status.get("powerInput5vIo", "NOT_PRESENT")
+        step = (level // 10) * 10
+        if battery == "NOT_PRESENT":
+            return "no-bat-in-0" if p_in != "NOT_PRESENT" else "no-bat-rpi-0"
+        if battery == "CHARGING_FROM_IN" or p_in != "NOT_PRESENT":
+            return "bat-in-%d" % step
+        if battery == "CHARGING_FROM_5V_IO" or p_io != "NOT_PRESENT":
+            return "bat-rpi-%d" % step
+        return "bat-%d" % step
+
+    def refresh(self):
         try:
-            addr = I2C_ADDRESS_DEFAULT
-            bus = I2C_BUS_DEFAULT
+            level = self.service.get_charge_level()
+            status = self.service.get_status()
+            self.refresh_err = 0
+        except PiJuiceError:
+            self.refresh_err += 1
+            self.indicator.set_icon_full(self._icon_path("connection-error"),
+                                         "PiJuice: no connection")
+            self.level_item.set_label("No connection")
+            if self.refresh_err > 4:
+                Gtk.main_quit()
+            return True
+        self.indicator.set_icon_full(self._icon_path(self._icon_name(level, status)),
+                                     "%d%%" % level)
+        self.level_item.set_label("Charge: %d%%" % level)
+        return True  # keep the timer
 
-            configData = {}
-            with open(configPath, 'r') as outputConfig:
-                config_dict = json.load(outputConfig)
-                configData.update(config_dict)
-                
-            if 'board' in configData and 'general' in configData['board']:
-                if 'i2c_addr' in configData['board']['general']:
-                    addr = int(configData['board']['general']['i2c_addr'], 16)
-                if 'i2c_bus' in configData['board']['general']:
-                    bus = configData['board']['general']['i2c_bus']
+    def _on_settings(self, _widget):
+        app = _find_settings_app()
+        if app is None:
+            return
+        subprocess.Popen(["/usr/bin/python3", app],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            self.pijuice = PiJuice(bus, addr)
-        except:
-            sys.exit(0)
-            
-    def show_menu(self, widget, event_button, event_time):
-        self.menu.popup(None, None,
-        self.tray.position_menu,
-        self.tray,
-        event_button,
-        gtk.get_current_event_time())
-
-    def show_about(self, widget):
-        widget.set_sensitive(False)
-        sw_version, fw_version, os_version = get_versions()
-        if fw_version is None:
-            fw_version = "No connection to PiJuice"
-        message = "\n".join([
-            "Software version: %s" % sw_version,
-            "Firmware version: %s" % fw_version,
-            "OS version: %s" % os_version,
-        ])
-        dialog = gtk.MessageDialog(
-            parent=None,
-            modal=True,
-            message_type=gtk.MessageType.INFO,
-            buttons=gtk.ButtonsType.OK,
-            text=message
-        )
-        dialog.set_title("About")
+    def _on_about(self, _widget):
+        sw, fw, osv = get_versions()
+        msg = "Software: %s\nFirmware: %s\nOS: %s" % (sw, fw or "no connection", osv)
+        dialog = Gtk.MessageDialog(modal=True, message_type=Gtk.MessageType.INFO,
+                                   buttons=Gtk.ButtonsType.OK, text=msg)
+        dialog.set_title("About PiJuice")
         dialog.run()
         dialog.destroy()
-        widget.set_sensitive(True)
 
-    def ConfigurePiJuice(self, widget):
-        os.system("/usr/bin/pijuice_gui &")
 
-    def check_signum(self):
-        global sig
-        if sig > 0:
-            if sig == SIGUSR1:
-                self.settings_item.set_sensitive(False)
-                sig = -1
-            elif sig == SIGUSR2:
-                self.settings_item.set_sensitive(True)
-                sig = -1
-            else:
-                sig = -1
-        return True
+def main():
+    try:
+        with open(TRAY_PID_FILE, "w") as fh:
+            fh.write(str(os.getpid()))
+        os.chmod(TRAY_PID_FILE, 0o666)  # the settings GUI may signal us
+    except OSError:
+        pass
 
-    def refresh(self, widget):
-        try:
-            charge = self.pijuice.status.GetChargeLevel()
+    tray = PiJuiceTray()
 
-            if charge['error'] == 'NO_ERROR':
-                b_level = charge['data']
-                print('{}%'.format(b_level))
-            else:
-                self.init_pijuice_interface()
+    # The settings GUI can SIGUSR1/SIGUSR2 to grey/ungrey "Settings" while open.
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, int(SIGUSR1),
+                         lambda: (tray.settings_item.set_sensitive(False), True)[1])
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, int(SIGUSR2),
+                         lambda: (tray.settings_item.set_sensitive(True), True)[1])
 
-            b_file = ICON_DIR + '/battery_near_full.png'
+    Gtk.main()
 
-            status = self.pijuice.status.GetStatus()
-            if status['error'] == 'NO_ERROR':
-                self.status = status['data']
 
-                if self.status['battery'] == 'NOT_PRESENT':
-                    if self.status['powerInput'] != 'NOT_PRESENT':
-                        b_file = ICON_DIR + '/no-bat-in-0.png'
-                    else:
-                        b_file = ICON_DIR + '/no-bat-rpi-0.png'
-
-                elif self.status['battery'] == 'CHARGING_FROM_IN' or self.status['powerInput'] != 'NOT_PRESENT':
-                    b_file = ICON_DIR + '/bat-in-' + str((b_level//10)*10) + '.png'
-                elif self.status['battery'] == 'CHARGING_FROM_5V_IO' or self.status['powerInput5vIo'] != 'NOT_PRESENT':
-                    b_file = ICON_DIR + '/bat-rpi-' + str((b_level//10)*10) + '.png'
-                else:
-                    b_file = ICON_DIR + '/bat-' + str((b_level//10)*10) + '.png'
-            else:
-                b_file = ICON_DIR + '/connection-error.png'
-
-            self.tray.set_tooltip_text("%d%%" % (b_level))
-            if os.path.exists(b_file):
-                self.tray.set_from_file(b_file)
-            else:
-                print(b_file)
-                print('icon file not exist')
-
-        except:
-            print('refresh error')  # happens when no PiJuice present
-            self.refresh_err += 1
-            if self.refresh_err > 4:
-                sys.exit(0)
-        return True
-
-def receive_signal(signum, stack):
-    global sig
-    if signum == SIGUSR1 or signum == SIGUSR2:
-        sig = signum
-    else:
-        sig = -1
-
-if __name__ == '__main__':
-    global sig
-
-    sig = -1
-
-    # Make our pid available for pijuice_gui
-    pid = os.getpid()
-    with open(TRAY_PID_FILE, 'w') as f:
-        f.write(str(pid))
-    # Allow other user to overwrite this file
-    if oct(os.stat(TRAY_PID_FILE).st_mode & 0o777) != '0o666':
-        os.chmod(TRAY_PID_FILE, 0o666)
-
-    # Set up signal handlers.
-    # SIGUSR1 to disable the Settings menu item
-    # SIGUSR2 to enable the Settings menu item
-    signal(SIGUSR1, receive_signal)
-    signal(SIGUSR2, receive_signal)
-
-    app = PiJuiceStatusTray()
-    gtk.main()
+if __name__ == "__main__":
+    main()

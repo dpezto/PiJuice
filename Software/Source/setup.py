@@ -35,19 +35,21 @@ if int(os.environ.get('PIJUICE_BUILD_BASE', 0)) > 0:
     ]
     scripts = ['src/pijuice_sys.py', 'src/pijuice_cli.py', 'src/pijuice_log.py']
     description = "Software package for PiJuice"
-    py_modules=['pijuice']
+    # pijuice_service is the shared, UI-agnostic facade imported by both the CLI
+    # (here) and the GTK GUI, so it ships as a py_module alongside pijuice.
+    py_modules=['pijuice', 'pijuice_service']
 else:
     name = "pijuice-gui"
     py_modules = None
     data_files= [
-        ('share/applications', ['data/pijuice-gui.desktop']),
+        ('share/applications', ['data/pijuice-gui.desktop', 'data/pijuice-gtk.desktop']),
         ('/etc/xdg/autostart', ['data/pijuice-tray.desktop']),
         ('share/pijuice/data/images', glob.glob('data/images/*')), 
         ('/etc/X11/Xsession.d', ['data/36x11-pijuice_xhost']),
         ('bin', ['bin/pijuice_gui32']),
         ('bin', ['bin/pijuice_gui64']),
     ]
-    scripts = ['src/pijuice_tray.py', 'src/pijuice_gui.py']
+    scripts = ['src/pijuice_tray.py', 'src/pijuice_gui.py', 'src/pijuice_gtk.py']
     description = "GUI package for PiJuice"
 
 try:

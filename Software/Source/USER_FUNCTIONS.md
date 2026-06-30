@@ -6,18 +6,18 @@ pressed (or a system event fires). This covers the two pieces that confuse peopl
 
 ## The model
 
-| Piece | Where | What it is |
-|---|---|---|
-| `USER_FUNC1`…`USER_FUNC15` | `/var/lib/pijuice/pijuice_config.JSON` → `user_functions` | A shell command string per slot. |
-| Button event → function | firmware (set over I2C) | Maps `SW1/2/3` × `PRESS/RELEASE/SINGLE/DOUBLE/LONG` to a function name. |
-| `pijuice_sys.py` | systemd `pijuice.service` | The daemon that actually runs the command when the firmware reports the event. |
+| Piece                      | Where                                                     | What it is                                                                     |
+| -------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `USER_FUNC1`…`USER_FUNC15` | `/var/lib/pijuice/pijuice_config.JSON` → `user_functions` | A shell command string per slot.                                               |
+| Button event → function    | firmware (set over I2C)                                   | Maps `SW1/2/3` × `PRESS/RELEASE/SINGLE/DOUBLE/LONG` to a function name.        |
+| `pijuice_sys.py`           | systemd `pijuice.service`                                 | The daemon that actually runs the command when the firmware reports the event. |
 
 Flow: **press button → firmware records the configured function → `pijuice_sys`
 sees `USER_FUNCx` → runs the matching command from `user_functions`.**
 
 Important: `pijuice_sys` runs as the **`pijuice`** user, not root and not your
 login user. Commands that need your Wayland session or root must go through a
-small wrapper (see *Permissions* below).
+small wrapper (see _Permissions_ below).
 
 ## 1. Define the command (User Scripts)
 
@@ -80,12 +80,12 @@ pkill wvkbd-mobintl || wvkbd-mobintl -L 280 &
 
 ## Worked example: on / off / open visor / close visor
 
-| Button event | Function | Command (USER_FUNC) |
-|---|---|---|
-| SW1 SINGLE | `HARD_FUNC_POWER_ON` | — (firmware) |
-| SW1 LONG | `SYS_FUNC_HALT_POW_OFF` | — (firmware) |
-| SW2 SINGLE | `USER_FUNC3` | `/usr/local/bin/visor-open.sh` |
-| SW3 SINGLE | `USER_FUNC4` | `/usr/local/bin/visor-close.sh` |
+| Button event | Function                | Command (USER_FUNC)             |
+| ------------ | ----------------------- | ------------------------------- |
+| SW1 SINGLE   | `HARD_FUNC_POWER_ON`    | — (firmware)                    |
+| SW1 LONG     | `SYS_FUNC_HALT_POW_OFF` | — (firmware)                    |
+| SW2 SINGLE   | `USER_FUNC3`            | `/usr/local/bin/visor-open.sh`  |
+| SW3 SINGLE   | `USER_FUNC4`            | `/usr/local/bin/visor-close.sh` |
 
 After editing, restart cleanly so the daemon re-reads everything:
 
