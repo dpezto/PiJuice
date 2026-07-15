@@ -107,4 +107,22 @@ if [ -f /sys/class/i2c-dev/i2c-1/dev ]; then
 	systemctl start pijuice.service
 fi
 
+# Build and load the pijuice_power virtual battery module via DKMS, so btop /
+# upower / desktops can read the HAT battery from /sys/class/power_supply.
+# The pijuice_sys daemon pushes live values into it each poll.
+PJ_MOD=pijuice-power
+PJ_MOD_VER=1.0
+if command -v dkms > /dev/null 2>&1 && [ -d "/usr/src/${PJ_MOD}-${PJ_MOD_VER}" ]; then
+	if ! dkms status -m "$PJ_MOD" -v "$PJ_MOD_VER" 2>/dev/null | grep -q "$PJ_MOD"; then
+		dkms add -m "$PJ_MOD" -v "$PJ_MOD_VER" || echo "dkms add $PJ_MOD failed"
+	fi
+	if dkms install -m "$PJ_MOD" -v "$PJ_MOD_VER" --force; then
+		modprobe pijuice_power || echo "modprobe pijuice_power failed (module loads on next boot)"
+	else
+		echo "dkms install $PJ_MOD failed; is raspberrypi-kernel-headers installed?"
+	fi
+else
+	echo "dkms or module source missing; skipping pijuice_power build"
+fi
+
 exit 0

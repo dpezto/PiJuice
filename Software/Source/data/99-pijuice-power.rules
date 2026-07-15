@@ -1,0 +1,4 @@
+# The pijuice_power virtual battery exposes writable sysfs attrs owned root:root
+# 0644, but the pijuice_sys daemon runs as user pijuice. Hand its group write
+# access so it can push live values. %p = devpath; $$a = literal $a for the shell.
+SUBSYSTEM=="power_supply", KERNEL=="pijuice", ACTION=="add", RUN+="/bin/sh -c 'for a in status present capacity voltage_now current_now temp; do chgrp pijuice /sys%p/$$a && chmod g+w /sys%p/$$a; done'"

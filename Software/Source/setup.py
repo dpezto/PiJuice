@@ -32,6 +32,12 @@ if int(os.environ.get('PIJUICE_BUILD_BASE', 0)) > 0:
         ('bin', ['bin/pijuice_cli32']),
         ('bin', ['bin/pijuice_cli64']),
         ('lib/tmpfiles.d', ['data/pijuice.conf']),
+        # DKMS source for the pijuice_power virtual battery; built in postinst.
+        ('/usr/src/pijuice-power-1.0', ['../kernel/pijuice_power/pijuice_power.c',
+                                        '../kernel/pijuice_power/Makefile',
+                                        '../kernel/pijuice_power/dkms.conf']),
+        ('/etc/modules-load.d', ['../kernel/pijuice_power/pijuice_power.conf']),
+        ('/etc/udev/rules.d', ['data/99-pijuice-power.rules']),
     ]
     scripts = ['src/pijuice_sys.py', 'src/pijuice_cli.py', 'src/pijuice_log.py']
     description = "Software package for PiJuice"

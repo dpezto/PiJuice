@@ -961,7 +961,7 @@ class LEDTab(object):
                 color_edit,
                 "change",
                 self._set_color,
-                {"color_index": colors.index(color), "led_index": index},
+                user_args=[{"color_index": colors.index(color), "led_index": index}],
             )
             elements.append(attrmap(color_edit))
         elements.extend(
@@ -1047,7 +1047,7 @@ class LEDTab(object):
         self.bgroup = []
         self.configure_led(None, led_index)
 
-    def _set_color(self, edit, text, data):
+    def _set_color(self, data, edit, text):
         led_index = data["led_index"]
         color_index = data["color_index"]
         try:
@@ -1153,7 +1153,7 @@ class ButtonsTab(object):
             parameter_edit,
             "change",
             self._set_parameter,
-            {"sw_id": sw_id, "action": action},
+            user_args=[{"sw_id": sw_id, "action": action}],
         )
         parameter_edit = attrmap(parameter_edit)
         parameter_text = urwid.Text(
@@ -1223,7 +1223,7 @@ class ButtonsTab(object):
         self.bgroup = []
         self.configure_action(None, data)
 
-    def _set_parameter(self, edit, text, data):
+    def _set_parameter(self, data, edit, text):
         sw_id = data["sw_id"]
         action = data["action"]
         # 'PRESS' and 'RELEASE' take no parameter
@@ -3322,7 +3322,7 @@ def menu(title, choices):
     for c in choices:
         if c != "":
             button = urwid.Button(c)
-            urwid.connect_signal(button, "click", item_chosen, c)
+            urwid.connect_signal(button, "click", item_chosen, user_args=[c])
             wrapped_button = urwid.Padding(attrmap(button), width=20)
             body.append(wrapped_button)
         else:
@@ -3330,7 +3330,7 @@ def menu(title, choices):
     return CyclingListBox(urwid.SimpleFocusListWalker(body))
 
 
-def item_chosen(button, choice):
+def item_chosen(choice, button):
     global _location, _dirty, _last_choice
     _location = choice
     _last_choice = choice

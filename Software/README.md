@@ -59,6 +59,35 @@ Add the following line:
 osmc ALL=(pijuice) ALL
 ```
 
+## Battery status in system monitors (btop, upower, desktops)
+
+Tools like `btop`, `upower` and desktop battery indicators read batteries only
+from the kernel's `/sys/class/power_supply/`. The PiJuice sits behind I2C and
+has no in-kernel driver, so it never appears there by default.
+
+The `pijuice-base` package ships a small DKMS kernel module, `pijuice_power`,
+that registers a virtual battery named `pijuice`. The `pijuice_sys` service
+pushes live charge, status, voltage, current and temperature into it each poll,
+so any standard tool shows the HAT battery with no extra configuration.
+
+Requires `dkms` and `raspberrypi-kernel-headers` (pulled in as dependencies);
+the module is built and loaded on install and rebuilt automatically on kernel
+updates. To set it up on a manual install:
+
+```bash
+sudo cp -r Software/kernel/pijuice_power /usr/src/pijuice-power-1.0
+sudo dkms add -m pijuice-power -v 1.0
+sudo dkms install -m pijuice-power -v 1.0
+echo pijuice_power | sudo tee /etc/modules-load.d/pijuice_power.conf
+sudo cp Software/Source/data/99-pijuice-power.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+sudo modprobe pijuice_power
+```
+
+The udev rule grants the `pijuice` service group write access to the module's
+sysfs attributes (they are otherwise `root`-only); without it the daemon cannot
+update the reading.
+
 ## GUI Menus
 
 > **Note:** The settings GUI was rebuilt as a GTK4 / libadwaita application

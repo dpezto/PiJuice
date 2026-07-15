@@ -35,6 +35,19 @@ pijuice-base; urgency=low
       address constants
     - Security: the notify path no longer shells out via `os.system`
     - Importing the module no longer launches the TUI or grabs the lock
+    - Silence urwid's `user_arg` DeprecationWarning: the three remaining
+      `connect_signal` calls now pass `user_args=[...]` (which prepends), with
+      the callbacks' extra parameter moved to the front to match
+
+* New: expose the battery to system monitors (btop, upower, desktops)
+    - kernel/pijuice_power: a DKMS module registering a virtual `power_supply`
+      named `pijuice` in `/sys/class/power_supply/`, with writable sysfs attrs.
+      Built/loaded on install, rebuilt on kernel updates, autoloaded at boot
+      (`/etc/modules-load.d`). Adds `dkms` + `raspberrypi-kernel-headers` deps
+    - src/pijuice_sys.py: the service pushes charge/status/voltage/current/temp
+      into the module each 5s poll (`_UpdatePowerSupply`)
+    - data/99-pijuice-power.rules: udev rule granting the pijuice service group
+      write access to the module's otherwise root-only sysfs attrs
 
 ## Version 1.2
 Added packages to both Raspbian Jessie and Stretch

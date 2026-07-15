@@ -23,6 +23,9 @@ pijuice = None
 btConfig = {}
 
 configPath = '/var/lib/pijuice/pijuice_config.JSON'  # os.getcwd() + '/pijuice_config.JSON'
+# Virtual power_supply exposed by the pijuice_power kernel module, so btop /
+# upower / desktops see the HAT battery. Absent if the module isn't loaded.
+POWER_SUPPLY_DIR = '/sys/class/power_supply/pijuice'
 configData = {'system_task': {'enabled': False}}
 status = {}
 sysEvEn = False
@@ -285,6 +288,48 @@ def reload_settings(signum=None, frame=None):
     global watchdogEn
     if watchdogEn: _ConfigureWatchdog('ACTIVATE') # Update watchdog setting
 
+def _write_power_supply(attr, val):
+    try:
+        with open(os.path.join(POWER_SUPPLY_DIR, attr), 'w') as f:
+            f.write(str(val))
+    except OSError:
+        pass  # module not loaded / attr not writable: nothing to report to
+
+
+def _UpdatePowerSupply(status):
+    # ponytail: called from the 5s poll block, not the 1s path, so the extra
+    # voltage/current/temp I2C reads stay cheap. Tighten if a UI lags.
+    if not os.path.isdir(POWER_SUPPLY_DIR):
+        return
+    bat = status.get('battery')
+    charge = pijuice.status.GetChargeLevel().get('data')
+    if bat == 'NOT_PRESENT':
+        _write_power_supply('present', 0)
+        _write_power_supply('status', 'Unknown')
+    else:
+        _write_power_supply('present', 1)
+        if bat in ('CHARGING_FROM_IN', 'CHARGING_FROM_5V_IO'):
+            st = 'Charging'
+        elif isinstance(charge, int) and charge >= 100:
+            st = 'Full'
+        elif status.get('powerInput') == 'PRESENT' or status.get('powerInput5vIo') == 'PRESENT':
+            st = 'Not charging'
+        else:
+            st = 'Discharging'
+        _write_power_supply('status', st)
+    if isinstance(charge, int):
+        _write_power_supply('capacity', charge)
+    v = pijuice.status.GetBatteryVoltage().get('data')      # mV   -> uV
+    if isinstance(v, int):
+        _write_power_supply('voltage_now', v * 1000)
+    i = pijuice.status.GetBatteryCurrent().get('data')      # mA   -> uA
+    if isinstance(i, int):
+        _write_power_supply('current_now', i * 1000)
+    t = pijuice.status.GetBatteryTemperature().get('data')  # degC -> 0.1 degC
+    if isinstance(t, int):
+        _write_power_supply('temp', t * 10)
+
+
 def main():
     global pijuice
     global configData
@@ -394,6 +439,7 @@ def main():
                 timeCnt -= 1
                 if timeCnt == 0:
                     timeCnt = 5
+                    _UpdatePowerSupply(status)
                     if ('isFault' in status) and status['isFault']:
                         _EvalFaultFlags()
                     if minChgEn:
