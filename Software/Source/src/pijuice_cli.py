@@ -3531,15 +3531,20 @@ def _hoist_back(widget):
 class _ContentArea(urwid.Padding):
     """Padding whose content swap hoists the view's Back button into the header."""
 
-    def _set_original_widget(self, widget):
+    # urwid >= 2.4 turned WidgetDecoration._get/_set_original_widget into
+    # deprecation shims that delegate back to the property; building the
+    # property from them recurses forever (RecursionError on first keypress).
+    @property
+    def original_widget(self):
+        return self._original_widget
+
+    @original_widget.setter
+    def original_widget(self, widget):
         back = None if _suppress_hoist else _hoist_back(widget)
-        urwid.WidgetDecoration._set_original_widget(self, widget)
+        self._original_widget = widget
+        self._invalidate()
         if not _suppress_hoist:
             _on_view_changed(back)
-
-    original_widget = property(
-        urwid.WidgetDecoration._get_original_widget, _set_original_widget
-    )
 
 
 def _on_view_changed(back):
