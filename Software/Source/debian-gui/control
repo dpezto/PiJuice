@@ -8,7 +8,7 @@ Standards-Version: 3.9.6
 Package: pijuice-gui
 Architecture: all
 Depends: python3 (>= 3.5), pijuice-base (>= 1.7),
- python3-gi, gir1.2-gtk-4.0, gir1.2-ayatanaappindicator3-0.1
+ python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, gir1.2-ayatanaappindicator3-0.1
 Conflicts: pijuice, pijuice-base (<= 1.3.3)
 Description: The desktop applications for the Pi-Supply PiJuice HAT
  This package contains the desktop configuration utility (pijuice_gtk.py)
