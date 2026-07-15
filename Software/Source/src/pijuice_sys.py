@@ -91,7 +91,6 @@ def ExecuteFunc(func, event, param):
             return
         # Get owner and ownergroup names
         owner = pwd.getpwuid(statinfo.st_uid).pw_name
-        ownergroup = grp.getgrgid(statinfo.st_gid).gr_name
         # Do not allow programs owned by root
         if owner == 'root':
             print("root owned " + cmd + " not allowed")
@@ -101,25 +100,12 @@ def ExecuteFunc(func, event, param):
             print(cmd + " is not executable")
             return
         # Owner of cmd must belong to mygroup ('pijuice')
-        mygroup = grp.getgrgid(os.getegid()).gr_name
-        # Find all groups owner belongs too
-        groups = [g.gr_name for g in grp.getgrall() if owner in g.gr_mem]
-        groups.append(ownergroup) # append primary group
-        # Does owner belong to mygroup?
-        found = 0
-        for g in groups:
-            if g == mygroup:
-                found = 1
-                break
-        if found == 0:
-            print(cmd + " owner ('" + owner + "') does not belong to '" + mygroup + "'")
+        if os.getegid() not in os.getgrouplist(owner, statinfo.st_gid):
+            print(cmd + " owner ('" + owner + "') does not belong to '" + grp.getgrgid(os.getegid()).gr_name + "'")
             return
         # All checks passed
-        cmd = "sudo -u " + owner + " " + cmd + " {event} {param}".format(
-                                                      event=str(event),
-                                                      param=str(param))
         try:
-            os.system(cmd)
+            subprocess.call(["sudo", "-u", owner, cmd, str(event), str(param)])
         except:
             print('Failed to execute user func')
 
