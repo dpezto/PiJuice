@@ -32,7 +32,7 @@ PiJuice will actually work straight out of the box, with no software, to power t
 ```bash
 sudo apt-get install pijuice-gui
 ```
-After a restart a new icon "PiJuice Settings" will appear under Menu>Preferences.
+After a restart a new icon "PiJuice Settings" will appear under Menu>Preferences. The settings app is a GTK4 / libadwaita application that follows your desktop's light or dark theme automatically.
 
 ![pijuice](https://raw.githubusercontent.com/PiSupply/PiJuice/master/Software/Source/data/images/pijuice.png)
 

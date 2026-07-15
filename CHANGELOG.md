@@ -1,3 +1,41 @@
+## Unreleased
+
+### Software
+pijuice-gui; urgency=low
+
+* src/pijuice_gtk.py:
+    - Rebuilt on libadwaita: HIG-consistent rows and **automatic light/dark
+      theme following the system** (via `Adw.Application`/`StyleManager`)
+    - Follow the system dark theme on Raspberry Pi OS too, which signals dark via
+      the GTK theme name (`PiXnoir`) rather than the freedesktop color-scheme
+      portal: read the theme name before Adw masks it and set the scheme when the
+      portal has no preference
+    - User Scripts: a file-browser button per row (`Gtk.FileChooserNative`),
+      mirroring the CLI's file navigation
+    - Hide `Adw.EntryRow`'s edit affordance (its `document-edit-symbolic` icon is
+      absent from Pi icon themes, so it rendered as a broken-image glyph)
+    - Every tab ported to `Adw.PreferencesPage` groups/rows; the per-tab grid,
+      touch-sizing CSS and duplicated Apply/Refresh/`_saved`/combo-index helpers
+      collapsed into shared base-view builders
+    - `--selftest` builds the window and asserts every page is present
+    - New dependency: `gir1.2-adw-1`
+
+* src/pijuice_tray.py:
+    - Removed the orphaned SIGUSR1/SIGUSR2 "grey out Settings" handlers and the
+      world-writable (0666) PID file — nothing signalled the tray
+
+pijuice-base; urgency=low
+
+* src/pijuice_cli.py:
+    - Fix crash (RecursionError) on the first keypress with urwid >= 2.4:
+      `_ContentArea.original_widget` was built from urwid's deprecated
+      `_get/_set_original_widget` shims, which now delegate back to the property
+    - Route config load/save and the service SIGHUP notify through
+      `pijuice_service` (single source of truth); drop the duplicated path/bus/
+      address constants
+    - Security: the notify path no longer shells out via `os.system`
+    - Importing the module no longer launches the TUI or grabs the lock
+
 ## Version 1.2
 Added packages to both Raspbian Jessie and Stretch
 

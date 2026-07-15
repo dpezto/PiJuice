@@ -43,7 +43,7 @@ sudo apt install ./pijuice-gui_1.8_all.deb
 4. Fix broken packages:\
 `sudo apt --fix-broken install`
 
-5. Reboot and run PiJuice CLI or PiJuice GUI when on Desktop:\
+5. Reboot and run PiJuice CLI, or the GUI when on a desktop:\
 `sudo reboot`\
 Once rebooted run:\
-`pijuice_cli` or `pijuice_gui`
+`pijuice_cli` (terminal UI) or `python3 /usr/bin/pijuice_gtk.py` (GTK4 GUI, follows the system light/dark theme)

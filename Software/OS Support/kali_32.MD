@@ -37,10 +37,11 @@ Once rebooted run:
 Fix broken packages:
 `sudo apt --fix-broken install`
 
-PiJuice GUI will now be added to the application menu and you can run the following command to load the GUI:
-`pijuice_gui`
+"PiJuice Settings" will now be added to the application menu (Preferences). The
+GUI is a GTK4 / libadwaita app that follows your desktop's light/dark theme
+automatically. You can also launch it directly with:
+`python3 /usr/bin/pijuice_gtk.py`
 
-9. Reboot and run PiJuice GUI:
+9. Reboot to start the tray icon and settings app:
 `sudo reboot`
-Once rebooted run:
-`pijuice_gui`
+Once rebooted, open "PiJuice Settings" from the application menu.

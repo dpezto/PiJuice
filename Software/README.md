@@ -26,7 +26,7 @@ Install the dependency python urwid package:
 
 For the light version:
 
-`sudo dpkg -i ./pijuice-base_1.u_all.deb`
+`sudo dpkg -i ./pijuice-base_1.8_all.deb`
 
 For example for the full version with GUI:
 
@@ -60,6 +60,14 @@ osmc ALL=(pijuice) ALL
 ```
 
 ## GUI Menus
+
+> **Note:** The settings GUI was rebuilt as a GTK4 / libadwaita application
+> (`pijuice_gtk.py`), Wayland-native and **following your desktop's light or dark
+> theme automatically**. Navigation is a sidebar (Status, Buttons, LEDs, System
+> Events, User Scripts, Battery, IO, Wakeup Alarm, System Task, Firmware) rather
+> than the tabbed window shown in the screenshots below, which are from an
+> earlier release. The individual settings and their meanings are unchanged, so
+> the descriptions in each section still apply.
 
 We have also taken a LOT of screenshots of all the different menu options etc to show you the full software. So lets get stuck in:
 
@@ -100,7 +108,7 @@ You can also right click on this icon to load the configuration menu, instead of
 
 ![Main software menu, with battery attached](https://user-images.githubusercontent.com/1197294/59568742-2d7e2980-907f-11e9-8e36-c2b32b60f5f1.png "Main software menu, with battery attached")
 
-This picture is how the PiJuice Settings software looks when it loads up. This also shows some basic information about the battery charge, battery voltage, and where it is charging from....here is it showing 97% and a high voltage on the battery. You can also see that it is charging from the Pi GPIO (meaning it is plugged in to the Pis microUSB) and it also shows the rail voltages and current draw over the GPIO pins. Below that is the PiJuice microUSB and as you can see in this screenshot that is plugged in. There is a fault checker, a system switch state and also a link to a HAT config menu (more on that later! - see PiJuice HAT Configuration Menu screenshot).
+The **Status** page (first in the sidebar) is what you see when the app loads. It shows basic information about the battery charge, battery voltage, and where it is charging from....here is it showing 97% and a high voltage on the battery. You can also see that it is charging from the Pi GPIO (meaning it is plugged in to the Pis microUSB) and it also shows the rail voltages and current draw over the GPIO pins. Below that is the PiJuice microUSB and as you can see in this screenshot that is plugged in. There is a fault checker, a system switch state and also a link to a HAT config menu (more on that later! - see PiJuice HAT Configuration Menu screenshot).
 
 - **Battery:**
   - Battery Charge - 0-100%

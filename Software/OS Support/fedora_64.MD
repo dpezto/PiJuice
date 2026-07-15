@@ -33,6 +33,6 @@ sudo reboot
 ```
 
 ## Run PiJuice Software
-Once rebooted, find the tray in the upper right. Right-click to launch the settings gui. Run the PiJuice Settings application from the GNOME menu. From the command line launch:
+Once rebooted, find the tray in the upper right. Right-click to launch the settings app, or run "PiJuice Settings" from the GNOME menu (a GTK4 / libadwaita app that follows the system light/dark theme). From the command line launch:
 
-`pijuice_cli` or `pijuice_gui`
+`pijuice_cli` (terminal UI) or `python3 /usr/bin/pijuice_gtk.py` (GUI)
