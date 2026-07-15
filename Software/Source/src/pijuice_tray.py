@@ -12,7 +12,6 @@ from the GTK4 settings app and only shares the toolkit-agnostic
 import os
 import subprocess
 import sys
-from signal import SIGUSR1, SIGUSR2
 
 # No a11y D-Bus on the Pi; skip the GTK3 atk-bridge to avoid a startup warning.
 os.environ.setdefault("NO_AT_BRIDGE", "1")
@@ -43,9 +42,11 @@ TRAY_PID_FILE = "/run/pijuice/pijuice_tray.pid"
 def _find_settings_app():
     """Locate the GTK4 settings script (dev tree or installed)."""
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.path.join(here, "pijuice_gtk.py"),
-                 "/usr/bin/pijuice_gtk.py",
-                 "/usr/share/pijuice/pijuice_gtk.py"):
+    for cand in (
+        os.path.join(here, "pijuice_gtk.py"),
+        "/usr/bin/pijuice_gtk.py",
+        "/usr/share/pijuice/pijuice_gtk.py",
+    ):
         if os.path.exists(cand):
             return cand
     return None
@@ -57,7 +58,8 @@ class PiJuiceTray(object):
         self.refresh_err = 0
 
         self.indicator = AppIndicator.Indicator.new(
-            APP_ID, "pijuice", AppIndicator.IndicatorCategory.HARDWARE)
+            APP_ID, "pijuice", AppIndicator.IndicatorCategory.HARDWARE
+        )
         # Resolve our icon basenames from ICON_DIR. Panels load the icon by
         # IconName + IconThemePath (SNI); passing an absolute path instead made
         # the panel look up a bare basename in its own theme and find nothing.
@@ -116,14 +118,12 @@ class PiJuiceTray(object):
             self.refresh_err = 0
         except PiJuiceError:
             self.refresh_err += 1
-            self.indicator.set_icon_full("connection-error",
-                                         "PiJuice: no connection")
+            self.indicator.set_icon_full("connection-error", "PiJuice: no connection")
             self.level_item.set_label("No connection")
             if self.refresh_err > 4:
                 Gtk.main_quit()
             return True
-        self.indicator.set_icon_full(self._icon_name(level, status),
-                                     "%d%%" % level)
+        self.indicator.set_icon_full(self._icon_name(level, status), "%d%%" % level)
         self.level_item.set_label("Charge: %d%%" % level)
         return True  # keep the timer
 
@@ -131,14 +131,21 @@ class PiJuiceTray(object):
         app = _find_settings_app()
         if app is None:
             return
-        subprocess.Popen(["/usr/bin/python3", app],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            ["/usr/bin/python3", app],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def _on_about(self, _widget):
         sw, fw, osv = get_versions()
         msg = "Software: %s\nFirmware: %s\nOS: %s" % (sw, fw or "no connection", osv)
-        dialog = Gtk.MessageDialog(modal=True, message_type=Gtk.MessageType.INFO,
-                                   buttons=Gtk.ButtonsType.OK, text=msg)
+        dialog = Gtk.MessageDialog(
+            modal=True,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=msg,
+        )
         dialog.set_title("About PiJuice")
         dialog.run()
         dialog.destroy()
@@ -148,18 +155,10 @@ def main():
     try:
         with open(TRAY_PID_FILE, "w") as fh:
             fh.write(str(os.getpid()))
-        os.chmod(TRAY_PID_FILE, 0o666)  # the settings GUI may signal us
     except OSError:
         pass
 
-    tray = PiJuiceTray()
-
-    # The settings GUI can SIGUSR1/SIGUSR2 to grey/ungrey "Settings" while open.
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, int(SIGUSR1),
-                         lambda: (tray.settings_item.set_sensitive(False), True)[1])
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, int(SIGUSR2),
-                         lambda: (tray.settings_item.set_sensitive(True), True)[1])
-
+    PiJuiceTray()
     Gtk.main()
 
 
