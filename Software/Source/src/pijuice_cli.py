@@ -1,4 +1,4 @@
-# This python script to be executed as user pijuice by the setuid program pijuice_cli 
+# This python script to be executed as user pijuice by the setuid program pijuice_cli
 # Python 3 only
 #
 # -*- coding: utf-8 -*-
@@ -13,25 +13,41 @@ import json
 import sys
 
 import urwid
-from pijuice import PiJuice, pijuice_hard_functions, pijuice_sys_functions, pijuice_user_functions
+from pijuice import (
+    PiJuice,
+    pijuice_hard_functions,
+    pijuice_sys_functions,
+    pijuice_user_functions,
+)
+
+# Shared, UI-agnostic helpers (paths, config I/O, service notify) live in
+# pijuice_service so the CLI, GUI and tray agree on one source of truth.
+from pijuice_service import (
+    ADDRESS_DEFAULT,
+    BUS_DEFAULT,
+    CONFIG_PATH_DEFAULT,
+    PID_FILE_DEFAULT,
+    load_config as _service_load_config,
+    notify_service as _service_notify_service,
+    save_config as _service_save_config,
+)
 
 # Buttons render with [ label ] instead of urwid's default < label >.
 urwid.Button.button_left = urwid.Text("[")
 urwid.Button.button_right = urwid.Text("]")
 
-BUS = 1
-ADDRESS = 0x14
-PID_FILE = '/run/pijuice/pijuice_sys.pid'
-LOCK_FILE = '/run/pijuice/pijuice_gui.lock'
+BUS = BUS_DEFAULT
+ADDRESS = ADDRESS_DEFAULT
+PID_FILE = PID_FILE_DEFAULT
+LOCK_FILE = "/run/pijuice/pijuice_gui.lock"  # CLI-only single-instance lock
 
-#try:
-#    pijuice = PiJuice(BUS, ADDRESS)
-#except:
 pijuice = None
 
 pijuiceConfigData = {}
-PiJuiceConfigDataPath = '/var/lib/pijuice/pijuice_config.JSON'
+PiJuiceConfigDataPath = CONFIG_PATH_DEFAULT
 
+# NumEdit/FloatEdit are vendored from urwid because urwid still ships no such
+# widget (2.1.2 has IntEdit only) -- do not delete this block.
 #### Following taken from urwid 2.0.2 to get a FloatEdit widget ###
 #
 # Urwid basic widget classes
@@ -56,7 +72,7 @@ PiJuiceConfigDataPath = '/var/lib/pijuice/pijuice_config.JSON'
 
 from urwid import Edit
 from decimal import Decimal
-#import re
+
 
 def _InitPiJuiceInterface():
     try:
@@ -65,17 +81,18 @@ def _InitPiJuiceInterface():
         global pijuiceConfigData
         if pijuiceConfigData == None:
             pijuiceConfigData = loadPiJuiceConfig()
-        if 'board' in pijuiceConfigData and 'general' in pijuiceConfigData['board']:
-            if 'i2c_addr' in pijuiceConfigData['board']['general']:
-                addr = int(pijuiceConfigData['board']['general']['i2c_addr'], 16)
-            if 'i2c_bus' in pijuiceConfigData['board']['general']:
-                bus = pijuiceConfigData['board']['general']['i2c_bus']
+        if "board" in pijuiceConfigData and "general" in pijuiceConfigData["board"]:
+            if "i2c_addr" in pijuiceConfigData["board"]["general"]:
+                addr = int(pijuiceConfigData["board"]["general"]["i2c_addr"], 16)
+            if "i2c_bus" in pijuiceConfigData["board"]["general"]:
+                bus = pijuiceConfigData["board"]["general"]["i2c_bus"]
         global pijuice
         pijuice = PiJuice(bus, addr)
         global current_fw_version
         current_fw_version = get_current_fw_version()
     except:
         pijuice = None
+
 
 class NumEdit(Edit):
     """NumEdit - edit numerical types
@@ -87,6 +104,7 @@ class NumEdit(Edit):
       + regular oct: 01234567
       + regular hex: 0123456789abcdef
     """
+
     ALLOWED = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
     def __init__(self, allowed, caption, default, trimLeadingZeros=True):
@@ -120,8 +138,9 @@ class NumEdit(Edit):
 class FloatEdit(NumEdit):
     """Edit widget for float values."""
 
-    def __init__(self, caption="", default=None,
-                 preserveSignificance=False, decimalSeparator='.'):
+    def __init__(
+        self, caption="", default=None, preserveSignificance=False, decimalSeparator="."
+    ):
         """
         caption -- caption markup
         default -- default edit value
@@ -130,15 +149,15 @@ class FloatEdit(NumEdit):
         """
         self.significance = None
         self._decimalSeparator = decimalSeparator
-        if decimalSeparator not in ['.', ',']:
-            raise ValueError("invalid decimalSeparator: {}".format(
-                             decimalSeparator))
+        if decimalSeparator not in [".", ","]:
+            raise ValueError("invalid decimalSeparator: {}".format(decimalSeparator))
 
         val = ""
         if default is not None and default != "":
             if not isinstance(default, (int, str, float, Decimal)):
-                raise ValueError("default: Only 'str', 'int', "
-                                 "'float' or Decimal input allowed")
+                raise ValueError(
+                    "default: Only 'str', 'int', 'float' or Decimal input allowed"
+                )
 
             if isinstance(default, str) and len(default):
                 # check if it is a float, raises a ValueError otherwise
@@ -150,8 +169,10 @@ class FloatEdit(NumEdit):
 
             val = str(default)
 
-        super(FloatEdit, self).__init__(self.ALLOWED[0:10] + decimalSeparator,
-                                        caption, val)
+        super(FloatEdit, self).__init__(
+            self.ALLOWED[0:10] + decimalSeparator, caption, val
+        )
+
 
 ####################################################################################
 
@@ -160,66 +181,82 @@ def version_to_str(number):
     # Convert int version to str {major}.{minor}
     return "{}.{}".format(number >> 4, number & 15)
 
+
 def get_current_fw_version():
     # Returns current version as int (first 4 bits - minor, second 4 bits - major)
     status = pijuice.config.GetFirmwareVersion()
 
-    if status['error'] == 'NO_ERROR':
-        major, minor = status['data']['version'].split('.')
+    if status["error"] == "NO_ERROR":
+        major, minor = status["data"]["version"].split(".")
     else:
         major = minor = 0
     current_version = (int(major) << 4) + int(minor)
     return current_version
 
+
 def validate_value(text, type, min, max, old):
-    if type == 'int':
+    if type == "int":
         var_type = int
-    elif type == 'float':
+    elif type == "float":
         var_type = float
     else:
         return text
-    if text == '':
-        text = '0'
+    if text == "":
+        text = "0"
     try:
         value = var_type(text)
-        if min is not None:
-            value = value if value >= min else min
-        if max is not None:
-            value = value if value <= max else max
+        if min is not None and value < min:
+            value = min
+        if max is not None and value > max:
+            value = max
     except ValueError:
         value = old
 
     return str(value)
 
 
-def confirmation_dialog(text, next, nextno='', single_option=True):
+def confirmation_dialog(text, next, nextno="", single_option=True):
     global _in_dialog, _dialog_cancel
+
     def done(cb, *bound):
         # Wrap a dialog callback so it clears the dialog flag before running.
         def inner(*a):
             global _in_dialog
             _in_dialog = False
             return cb(*(bound if bound else a))
+
         return inner
-    elements = [urwid.Padding(urwid.Text(text), align='center', width='pack'),
-                urwid.Divider()]
+
+    elements = [
+        urwid.Padding(urwid.Text(text), align="center", width="pack"),
+        urwid.Divider(),
+    ]
     if single_option:
         ok = done(next)
-        elements.append(urwid.Padding(attrmap(urwid.Button("OK", on_press=ok)), align='center', width=6))
+        elements.append(
+            urwid.Padding(
+                attrmap(urwid.Button("OK", on_press=ok)), align="center", width=6
+            )
+        )
         _dialog_cancel = lambda: ok(None)
     else:
         yes_btn = urwid.Button("Yes")
-        no_btn  = urwid.Button("No")
+        no_btn = urwid.Button("No")
         yes = done(next, None, True)
-        no  = done(nextno, None, False)
-        urwid.connect_signal(yes_btn, 'click', lambda b: yes())
-        urwid.connect_signal(no_btn, 'click', lambda b: no())
-        row = urwid.Columns([(7, attrmap(yes_btn)), (6, attrmap(no_btn))], dividechars=2)
-        elements.append(urwid.Padding(row, align='center', width=15))  # ←/→ or h/l to pick
+        no = done(nextno, None, False)
+        urwid.connect_signal(yes_btn, "click", lambda b: yes())
+        urwid.connect_signal(no_btn, "click", lambda b: no())
+        row = urwid.Columns(
+            [(7, attrmap(yes_btn)), (6, attrmap(no_btn))], dividechars=2
+        )
+        elements.append(
+            urwid.Padding(row, align="center", width=15)
+        )  # ←/→ or h/l to pick
         _dialog_cancel = lambda: no()
 
     _in_dialog = True
     main.original_widget = urwid.Filler(urwid.Pile(elements))
+
 
 class StatusTab(object):
     def __init__(self, *args):
@@ -229,71 +266,90 @@ class StatusTab(object):
         """
         HAT tab in GUI. Shows general status of the device.
         """
-        status = pijuice.status.GetStatus().get('data', {})
-        charge_level = pijuice.status.GetChargeLevel().get('data', -1)
+        status = pijuice.status.GetStatus().get("data", {})
+        charge_level = pijuice.status.GetChargeLevel().get("data", -1)
         general_info = "%i%%" % (charge_level)
 
-        voltage = float(pijuice.status.GetBatteryVoltage().get('data', 0))  # mV
+        voltage = float(pijuice.status.GetBatteryVoltage().get("data", 0))  # mV
         if voltage:
             general_info += ", %.3fV" % (voltage / 1000)
-            temp = pijuice.status.GetBatteryTemperature().get('data', -999)
+            temp = pijuice.status.GetBatteryTemperature().get("data", -999)
             if temp != -999:
-                general_info += ", %3d°C, %s" % (temp, status['battery'])
+                general_info += ", %3d°C, %s" % (temp, status["battery"])
 
-        usb_power = status.get('powerInput', 0)
+        usb_power = status.get("powerInput", 0)
 
-        io_voltage = float(pijuice.status.GetIoVoltage().get('data', 0))  # mV
-        io_current = float(pijuice.status.GetIoCurrent().get('data', 0))  # mA
-        gpio_info = "%.3fV, %.3fA, %s" % (io_voltage / 1000, io_current / 1000,
-                    status['powerInput5vIo'] if not(status == {}) else 'N/A')
+        io_voltage = float(pijuice.status.GetIoVoltage().get("data", 0))  # mV
+        io_current = float(pijuice.status.GetIoCurrent().get("data", 0))  # mA
+        gpio_info = "%.3fV, %.3fA, %s" % (
+            io_voltage / 1000,
+            io_current / 1000,
+            status["powerInput5vIo"] if not (status == {}) else "N/A",
+        )
 
         fault_info = pijuice.status.GetFaultStatus()
-        if fault_info['error'] == 'NO_ERROR':
+        if fault_info["error"] == "NO_ERROR":
             bpi = None
-            if ('battery_profile_invalid' in fault_info['data']) and fault_info['data']['battery_profile_invalid']:
-                bpi = 'battery profile invalid'
+            if ("battery_profile_invalid" in fault_info["data"]) and fault_info["data"][
+                "battery_profile_invalid"
+            ]:
+                bpi = "battery profile invalid"
             cti = None
-            if ('charging_temperature_fault' in fault_info['data']) and (fault_info['data']['charging_temperature_fault'] != 'NORMAL'):
-                cti = 'charging temperature ' + fault_info['data']['charging_temperature_fault']
+            if ("charging_temperature_fault" in fault_info["data"]) and (
+                fault_info["data"]["charging_temperature_fault"] != "NORMAL"
+            ):
+                cti = (
+                    "charging temperature "
+                    + fault_info["data"]["charging_temperature_fault"]
+                )
             if not (bpi or cti):
                 fault = None
             else:
                 faults = [x for x in (bpi, cti) if x]
-                fault = ', '.join(faults)
+                fault = ", ".join(faults)
         else:
-            fault = fault_info['error']
-        
-        sys_sw_status = pijuice.power.GetSystemPowerSwitch().get('data', None)
+            fault = fault_info["error"]
+
+        sys_sw_status = pijuice.power.GetSystemPowerSwitch().get("data", None)
         return {
             "battery": general_info,
             "gpio": gpio_info,
             "usb": str(usb_power),
             "fault": str(fault),
-            "sys_sw": (str(sys_sw_status) + "mA") if sys_sw_status != 0 else "Off"
+            "sys_sw": (str(sys_sw_status) + "mA") if sys_sw_status != 0 else "Off",
         }
 
     def update_status(self, obj, text):
         status_args = self.get_status()
-        text.set_text("HAT status\n\n"
-                      "Battery: {battery}\nGPIO power input: {gpio}\n"
-                      "USB Micro power input: {usb}\nFault: {fault}\n"
-                      "System switch: {sys_sw}\n".format(**status_args))
+        text.set_text(
+            "HAT status\n\n"
+            "Battery: {battery}\nGPIO power input: {gpio}\n"
+            "USB Micro power input: {usb}\nFault: {fault}\n"
+            "System switch: {sys_sw}\n".format(**status_args)
+        )
         self.alarm_handle = loop.set_alarm_in(1, self.update_status, text)
-        #self.alarm_handle = loop.set_alarm_in(6, self.update_status, text)
-
 
     def main(self, *args):
         status_args = self.get_status()
-        text = urwid.Text("HAT status\n\n"
-                        "Battery: {battery}\nGPIO power input: {gpio}\n"
-                        "USB Micro power input: {usb}\nFault: {fault}\n"
-                        "System switch: {sys_sw}\n".format(**status_args))
-        #refresh_btn = urwid.Padding(attrmap(urwid.Button('Refresh', on_press=self.main)), width=24)
-        main_menu_btn = urwid.Padding(attrmap(urwid.Button('Back', on_press=self._goto_main_menu)), width=24)
-        pwr_switch_btn = urwid.Padding(attrmap(urwid.Button('Change Power switch', on_press=self.change_power_switch)), width=24)
+        text = urwid.Text(
+            "HAT status\n\n"
+            "Battery: {battery}\nGPIO power input: {gpio}\n"
+            "USB Micro power input: {usb}\nFault: {fault}\n"
+            "System switch: {sys_sw}\n".format(**status_args)
+        )
+        main_menu_btn = urwid.Padding(
+            attrmap(urwid.Button("Back", on_press=self._goto_main_menu)), width=24
+        )
+        pwr_switch_btn = urwid.Padding(
+            attrmap(
+                urwid.Button("Change Power switch", on_press=self.change_power_switch)
+            ),
+            width=24,
+        )
         main.original_widget = urwid.Filler(
-            #urwid.Pile([text, urwid.Divider(), refresh_btn, pwr_switch_btn, main_menu_btn]), valign='top')
-            urwid.Pile([text, urwid.Divider(), pwr_switch_btn, main_menu_btn]), valign='top')
+            urwid.Pile([text, urwid.Divider(), pwr_switch_btn, main_menu_btn]),
+            valign="top",
+        )
         self.alarm_handle = loop.set_alarm_in(1, self.update_status, text)
 
     def change_power_switch(self, *args):
@@ -302,11 +358,25 @@ class StatusTab(object):
         values = [0, 500, 2100]
         for value in values:
             text = str(value) + " mA" if value else "Off"
-            elements.append(urwid.Padding(attrmap(urwid.Button(text, on_press=self.set_power_switch, user_data=value)), width=11))
-        elements.extend([urwid.Divider(),
-                        urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=8)])
-        main.original_widget = urwid.Filler(urwid.Pile(elements), valign='top')
-
+            elements.append(
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            text, on_press=self.set_power_switch, user_data=value
+                        )
+                    ),
+                    width=11,
+                )
+            )
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=self.main)), width=8
+                ),
+            ]
+        )
+        main.original_widget = urwid.Filler(urwid.Pile(elements), valign="top")
 
     def set_power_switch(self, button, value):
         pijuice.power.SetSystemPowerSwitch(int(value))
@@ -316,9 +386,21 @@ class StatusTab(object):
         loop.remove_alarm(self.alarm_handle)
         main_menu()
 
+
 class FirmwareTab(object):
-    FIRMWARE_UPDATE_ERRORS = ['NO_ERROR', 'I2C_BUS_ACCESS_ERROR', 'INPUT_FILE_OPEN_ERROR', 'STARTING_BOOTLOADER_ERROR', 'FIRST_PAGE_ERASE_ERROR',
-                              'EEPROM_ERASE_ERROR', 'INPUT_FILE_READ_ERROR', 'PAGE_WRITE_ERROR', 'PAGE_READ_ERROR', 'PAGE_VERIFY_ERROR', 'CODE_EXECUTE_ERROR']
+    FIRMWARE_UPDATE_ERRORS = [
+        "NO_ERROR",
+        "I2C_BUS_ACCESS_ERROR",
+        "INPUT_FILE_OPEN_ERROR",
+        "STARTING_BOOTLOADER_ERROR",
+        "FIRST_PAGE_ERASE_ERROR",
+        "EEPROM_ERASE_ERROR",
+        "INPUT_FILE_READ_ERROR",
+        "PAGE_WRITE_ERROR",
+        "PAGE_READ_ERROR",
+        "PAGE_VERIFY_ERROR",
+        "CODE_EXECUTE_ERROR",
+    ]
 
     def __init__(self, *args):
         self.firmware_path = None
@@ -327,29 +409,22 @@ class FirmwareTab(object):
     def check_for_fw_updates(self):
         # Check /usr/share/pijuice/data/firmware/ for new version of firmware.
         # Returns (version, path)
-        bin_file = None
-        bin_dir = '/usr/share/pijuice/data/firmware/'
+        import glob
 
-        try:
-            files = [f for f in os.listdir(bin_dir) if os.path.isfile(os.path.join(bin_dir, f))]
-            files = sorted(files)
-        except:
-            files = []
+        bin_dir = "/usr/share/pijuice/data/firmware/"
         latest_version = 0
         firmware_path = ""
 
         regex = re.compile(r"PiJuice-V(\d+)\.(\d+)_(\d+_\d+_\d+).elf.binary")
-        for f in files:
-            # 1 - major, 2 - minor, 3 - date
-            match = regex.match(f)
+        for path in sorted(glob.glob(os.path.join(bin_dir, "PiJuice-V*.elf.binary"))):
+            match = regex.match(os.path.basename(path))
             if match:
                 major = int(match.group(1))
                 minor = int(match.group(2))
                 version = (major << 4) + minor
                 if version >= latest_version:
                     latest_version = version
-                    bin_file = bin_dir + f
-                    firmware_path = bin_file
+                    firmware_path = path
 
         return latest_version, firmware_path
 
@@ -360,26 +435,38 @@ class FirmwareTab(object):
 
         if current_version and latest_version:
             if latest_version > current_version:
-                firmware_status = 'New firmware (V' + version_to_str(latest_version) + ') is available'
+                firmware_status = (
+                    "New firmware (V"
+                    + version_to_str(latest_version)
+                    + ") is available"
+                )
             else:
-                firmware_status = 'up to date'
+                firmware_status = "up to date"
         elif not current_version:
-            firmware_status = 'unknown'
+            firmware_status = "unknown"
         else:
-            firmware_status = 'Missing/wrong firmware file'
+            firmware_status = "Missing/wrong firmware file"
         return current_version, latest_version, firmware_status, firmware_path
 
     def update_firmware_start(self, *args):
         device_status = pijuice.status.GetStatus()
 
-        if device_status['error'] == 'NO_ERROR':
-            if device_status['data']['powerInput'] != 'PRESENT' and \
-                device_status['data']['powerInput5vIo'] != 'PRESENT' and \
-                pijuice.status.GetChargeLevel().get('data', 0) < 20:
+        if device_status["error"] == "NO_ERROR":
+            if (
+                device_status["data"]["powerInput"] != "PRESENT"
+                and device_status["data"]["powerInput5vIo"] != "PRESENT"
+                and pijuice.status.GetChargeLevel().get("data", 0) < 20
+            ):
                 # Charge level is too low
-                return confirmation_dialog("Charge level is too low", next=main_menu, single_option=True)
-        confirmation_dialog("Are you sure you want to update the firmware?", next=self.update_firmware,
-                            nextno=main_menu, single_option=False)
+                return confirmation_dialog(
+                    "Charge level is too low", next=main_menu, single_option=True
+                )
+        confirmation_dialog(
+            "Are you sure you want to update the firmware?",
+            next=self.update_firmware,
+            nextno=main_menu,
+            single_option=False,
+        )
 
     def update_firmware(self, *args):
         global current_fw_version
@@ -387,19 +474,34 @@ class FirmwareTab(object):
         error_status = None
         if current_addr:
             # Set up the 'Wait for update' screen
-            spinner = ['-', '\\', '|', '/']
+            spinner = ["-", "\\", "|", "/"]
             i = 0
-            waittext = urwid.Text("Updating firmware, Wait " + spinner[i], align='center')
-            main.original_widget = urwid.Filler(urwid.LineBox(urwid.Pile([
-                                      waittext,
-                                      urwid.Divider(),
-                                      urwid.Text("Interrupting this process can lead to a non-functional device.", align='center')
-                                      ])))
+            waittext = urwid.Text(
+                "Updating firmware, Wait " + spinner[i], align="center"
+            )
+            main.original_widget = urwid.Filler(
+                urwid.LineBox(
+                    urwid.Pile(
+                        [
+                            waittext,
+                            urwid.Divider(),
+                            urwid.Text(
+                                "Interrupting this process can lead to a non-functional device.",
+                                align="center",
+                            ),
+                        ]
+                    )
+                )
+            )
             loop.draw_screen()
             # Start the firmware update in a subprocess
-            addr = format(current_addr, 'x')
-            with open('/dev/null','w') as f:    # Suppress pijuiceboot output
-                p = subprocess.Popen(['pijuiceboot', addr, self.firmware_path], stdout=f, stderr=subprocess.STDOUT)
+            addr = format(current_addr, "x")
+            with open("/dev/null", "w") as f:  # Suppress pijuiceboot output
+                p = subprocess.Popen(
+                    ["pijuiceboot", addr, self.firmware_path],
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                )
             # Show the 'Wait for update' screen  with a rotating spinner
             finished = False
             while not finished:
@@ -409,57 +511,97 @@ class FirmwareTab(object):
                 except subprocess.TimeoutExpired:
                     finished = False
                 if not finished:
-                    i = (i+1)%4
+                    i = (i + 1) % 4
                     waittext.set_text("Updating firmware, Wait " + spinner[i])
                     loop.draw_screen()
             # Check the result
             result = 256 - p.returncode
             if result != 256:
-                error_status = self.FIRMWARE_UPDATE_ERRORS[result] if result < 11 else 'UNKNOWN'
+                error_status = (
+                    self.FIRMWARE_UPDATE_ERRORS[result] if result < 11 else "UNKNOWN"
+                )
                 messages = {
-                    "I2C_BUS_ACCESS_ERROR": 'Check if I2C bus is enabled.',
-                    "INPUT_FILE_OPEN_ERROR": 'Firmware binary file might be missing or damaged.',
-                    "STARTING_BOOTLOADER_ERROR": 'Try to start bootloader manually. Press and hold button SW3 while powering up RPI and PiJuice.',
+                    "I2C_BUS_ACCESS_ERROR": "Check if I2C bus is enabled.",
+                    "INPUT_FILE_OPEN_ERROR": "Firmware binary file might be missing or damaged.",
+                    "STARTING_BOOTLOADER_ERROR": "Try to start bootloader manually. Press and hold button SW3 while powering up RPI and PiJuice.",
                     "UNKNOWN_ADDRESS": "Unknown PiJuice I2C address",
                 }
         else:
             error_status = "UNKNOWN_ADDRESS"
 
         if error_status:
-            message = "Firmware update failed.\nReason: " + error_status + '. ' + messages.get(error_status, '')
+            message = (
+                "Firmware update failed.\nReason: "
+                + error_status
+                + ". "
+                + messages.get(error_status, "")
+            )
         else:
             # Wait till firmware has restarted (current_version != 0)
-            main.original_widget = urwid.Filler(urwid.LineBox(urwid.Pile([
-                                      urwid.Divider(),
-                                      urwid.Text("Waiting for firmware restart.", align='center'),
-                                      urwid.Divider(),
-                                      ])))
+            main.original_widget = urwid.Filler(
+                urwid.LineBox(
+                    urwid.Pile(
+                        [
+                            urwid.Divider(),
+                            urwid.Text("Waiting for firmware restart.", align="center"),
+                            urwid.Divider(),
+                        ]
+                    )
+                )
+            )
             loop.draw_screen()
             current_version = 0
             while current_version == 0:
                 current_version = get_current_fw_version()
                 time.sleep(0.2)
             current_fw_version = current_version
-            message = "Firmware update successful" + ": V" + version_to_str(current_fw_version)
+            message = (
+                "Firmware update successful"
+                + ": V"
+                + version_to_str(current_fw_version)
+            )
 
         confirmation_dialog(message, single_option=True, next=self.show_firmware)
-    
+
     def show_firmware(self, *args):
-        current_version, latest_version, firmware_status, firmware_path = self.get_fw_status()
-        current_version_txt = urwid.Text("Current version: " + version_to_str(current_version))
+        current_version, latest_version, firmware_status, firmware_path = (
+            self.get_fw_status()
+        )
+        current_version_txt = urwid.Text(
+            "Current version: " + version_to_str(current_version)
+        )
         firmware_path_txt = urwid.Text("Path: " + str(firmware_path))
         status_txt = urwid.Text("Status: " + firmware_status)
-        elements = [urwid.Text("Firmware"), urwid.Divider(), current_version_txt, status_txt, firmware_path_txt, urwid.Divider()]
+        elements = [
+            urwid.Text("Firmware"),
+            urwid.Divider(),
+            current_version_txt,
+            status_txt,
+            firmware_path_txt,
+            urwid.Divider(),
+        ]
         if latest_version > current_version:
             self.firmware_path = firmware_path
-            elements.extend([urwid.Padding(attrmap(urwid.Button('Update', on_press=self.update_firmware_start)),width=10),
-                             urwid.Divider()])
-        elements.append(urwid.Padding(attrmap(urwid.Button('Back', on_press=main_menu)),width=10))
-        main.original_widget = urwid.Filler(urwid.Pile(elements), valign='top')
+            elements.extend(
+                [
+                    urwid.Padding(
+                        attrmap(
+                            urwid.Button("Update", on_press=self.update_firmware_start)
+                        ),
+                        width=10,
+                    ),
+                    urwid.Divider(),
+                ]
+            )
+        elements.append(
+            urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=10)
+        )
+        main.original_widget = urwid.Filler(urwid.Pile(elements), valign="top")
 
 
 class GeneralTab(object):
-    if pijuice==None: _InitPiJuiceInterface()
+    if pijuice == None:
+        _InitPiJuiceInterface()
     if pijuice:
         RUN_PIN_VALUES = pijuice.config.runPinConfigs
         EEPROM_ADDRESSES = pijuice.config.idEepromAddresses
@@ -473,26 +615,44 @@ class GeneralTab(object):
             self.current_config = self._get_device_config()
             self.main()
         except:
-            confirmation_dialog("Unable to connect to device", single_option=True, next=main_menu)
+            confirmation_dialog(
+                "Unable to connect to device", single_option=True, next=main_menu
+            )
 
     def _get_device_config(self):
         config = {}
-        config['run_pin'] = self.RUN_PIN_VALUES.index(pijuice.config.GetRunPinConfig().get('data'))
-        config['i2c_addr'] = pijuice.config.GetAddress(1).get('data')
-        config['i2c_addr_rtc'] = pijuice.config.GetAddress(2).get('data')
-        config['eeprom_addr'] = self.EEPROM_ADDRESSES.index(pijuice.config.GetIdEepromAddress().get('data'))
-        config['eeprom_write_unprotected'] = not pijuice.config.GetIdEepromWriteProtect().get('data', False)
+        config["run_pin"] = self.RUN_PIN_VALUES.index(
+            pijuice.config.GetRunPinConfig().get("data")
+        )
+        config["i2c_addr"] = pijuice.config.GetAddress(1).get("data")
+        config["i2c_addr_rtc"] = pijuice.config.GetAddress(2).get("data")
+        config["eeprom_addr"] = self.EEPROM_ADDRESSES.index(
+            pijuice.config.GetIdEepromAddress().get("data")
+        )
+        config[
+            "eeprom_write_unprotected"
+        ] = not pijuice.config.GetIdEepromWriteProtect().get("data", False)
         result = pijuice.config.GetPowerInputsConfig()
-        if result['error'] == 'NO_ERROR':
-            pow_config = result['data']
-            config['precedence'] = self.INPUTS_PRECEDENCE.index(pow_config['precedence'])
-            config['gpio_in_enabled'] = pow_config['gpio_in_enabled']
-            config['usb_micro_current_limit'] = self.USB_CURRENT_LIMITS.index(pow_config['usb_micro_current_limit'])
-            config['usb_micro_dpm'] = self.USB_MICRO_IN_DPMS.index(pow_config['usb_micro_dpm'])
-            config['no_battery_turn_on'] = pow_config['no_battery_turn_on']
+        if result["error"] == "NO_ERROR":
+            pow_config = result["data"]
+            config["precedence"] = self.INPUTS_PRECEDENCE.index(
+                pow_config["precedence"]
+            )
+            config["gpio_in_enabled"] = pow_config["gpio_in_enabled"]
+            config["usb_micro_current_limit"] = self.USB_CURRENT_LIMITS.index(
+                pow_config["usb_micro_current_limit"]
+            )
+            config["usb_micro_dpm"] = self.USB_MICRO_IN_DPMS.index(
+                pow_config["usb_micro_dpm"]
+            )
+            config["no_battery_turn_on"] = pow_config["no_battery_turn_on"]
 
-        config['power_reg_mode'] = self.POWER_REGULATOR_MODES.index(pijuice.config.GetPowerRegulatorMode().get('data'))
-        config['charging_enabled'] = pijuice.config.GetChargingConfig().get('data', {}).get('charging_enabled')
+        config["power_reg_mode"] = self.POWER_REGULATOR_MODES.index(
+            pijuice.config.GetPowerRegulatorMode().get("data")
+        )
+        config["charging_enabled"] = (
+            pijuice.config.GetChargingConfig().get("data", {}).get("charging_enabled")
+        )
         return config
 
     def main(self, *args):
@@ -500,72 +660,157 @@ class GeneralTab(object):
         elements = [urwid.Text("General settings"), urwid.Divider()]
 
         options_with_lists = [
-            {'title': 'Run pin', 'list': self.RUN_PIN_VALUES, 'key': 'run_pin'},
-            {'title': 'EEPROM address', 'list': self.EEPROM_ADDRESSES, 'key': 'eeprom_addr'},
-            {'title': 'Inputs precedence', 'list': self.INPUTS_PRECEDENCE, 'key': 'precedence'},
-            {'title': 'USB micro current limit', 'list': self.USB_CURRENT_LIMITS, 'key': 'usb_micro_current_limit'},
-            {'title': 'USB micro IN DPM', 'list': self.USB_MICRO_IN_DPMS, 'key': 'usb_micro_dpm'},
-            {'title': 'Power regulator mode', 'list': self.POWER_REGULATOR_MODES, 'key': 'power_reg_mode'},
+            {"title": "Run pin", "list": self.RUN_PIN_VALUES, "key": "run_pin"},
+            {
+                "title": "EEPROM address",
+                "list": self.EEPROM_ADDRESSES,
+                "key": "eeprom_addr",
+            },
+            {
+                "title": "Inputs precedence",
+                "list": self.INPUTS_PRECEDENCE,
+                "key": "precedence",
+            },
+            {
+                "title": "USB micro current limit",
+                "list": self.USB_CURRENT_LIMITS,
+                "key": "usb_micro_current_limit",
+            },
+            {
+                "title": "USB micro IN DPM",
+                "list": self.USB_MICRO_IN_DPMS,
+                "key": "usb_micro_dpm",
+            },
+            {
+                "title": "Power regulator mode",
+                "list": self.POWER_REGULATOR_MODES,
+                "key": "power_reg_mode",
+            },
         ]
 
         options_with_checkboxes = [
-            {'title': "GPIO input enable", 'key': 'gpio_in_enabled'},
-            {'title': "EEPROM write unprotect", 'key': 'eeprom_write_unprotected'},
-            {'title': "Charging enabled", 'key': 'charging_enabled'},
-            {'title': "No battery turn on", 'key': 'no_battery_turn_on'},
+            {"title": "GPIO input enable", "key": "gpio_in_enabled"},
+            {"title": "EEPROM write unprotect", "key": "eeprom_write_unprotected"},
+            {"title": "Charging enabled", "key": "charging_enabled"},
+            {"title": "No battery turn on", "key": "no_battery_turn_on"},
         ]
 
         # I2C address
-        i2c_addr_edit = urwid.Edit("I2C address: ", edit_text=str(self.current_config['i2c_addr']))
-        urwid.connect_signal(i2c_addr_edit, 'change', lambda x, text: self.current_config.update({'i2c_addr': text}))
+        i2c_addr_edit = urwid.Edit(
+            "I2C address: ", edit_text=str(self.current_config["i2c_addr"])
+        )
+        urwid.connect_signal(
+            i2c_addr_edit,
+            "change",
+            lambda x, text: self.current_config.update({"i2c_addr": text}),
+        )
         elements.append(attrmap(i2c_addr_edit))
 
         # I2C address RTC
-        i2c_addr_rtc_edit = urwid.Edit("I2C address RTC: ", edit_text=str(self.current_config['i2c_addr_rtc']))
-        urwid.connect_signal(i2c_addr_rtc_edit, 'change', lambda x, text: self.current_config.update({'i2c_addr_rtc': text}))
+        i2c_addr_rtc_edit = urwid.Edit(
+            "I2C address RTC: ", edit_text=str(self.current_config["i2c_addr_rtc"])
+        )
+        urwid.connect_signal(
+            i2c_addr_rtc_edit,
+            "change",
+            lambda x, text: self.current_config.update({"i2c_addr_rtc": text}),
+        )
         elements.append(attrmap(i2c_addr_rtc_edit))
 
         for option in options_with_checkboxes:
-            elements.append(attrmap(urwid.CheckBox(option['title'], state=self.current_config[option['key']],
-                                           on_state_change=lambda x, state, key: self.current_config.update({key: state}),
-                                           user_data=option['key'])))
+            elements.append(
+                attrmap(
+                    urwid.CheckBox(
+                        option["title"],
+                        state=self.current_config[option["key"]],
+                        on_state_change=lambda x, state, key: (
+                            self.current_config.update({key: state})
+                        ),
+                        user_data=option["key"],
+                    )
+                )
+            )
 
         for option in options_with_lists:
-            elements.append(attrmap(urwid.Button("{title}: {value}".format(title=option['title'],
-                                         value=option['list'][self.current_config[option['key']]]),
-                                         on_press=self._list_options, user_data=option)))
+            elements.append(
+                attrmap(
+                    urwid.Button(
+                        "{title}: {value}".format(
+                            title=option["title"],
+                            value=option["list"][self.current_config[option["key"]]],
+                        ),
+                        on_press=self._list_options,
+                        user_data=option,
+                    )
+                )
+            )
 
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=self._apply_settings)), width=20),
-                         urwid.Padding(attrmap(urwid.Button('Reset to default', on_press=lambda x: confirmation_dialog(
-                             "This action will reset all settings on your device to their default values.\n"
-                             "Do you want to proceed?", single_option=False, next=self._reset_settings, nextno=main_menu))), width=20),
-                         urwid.Padding(attrmap(urwid.Button('Back', on_press=main_menu)), width=20)
-                         ])
-        main.original_widget = urwid.Padding(CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=48)
-        
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button("Apply settings", on_press=self._apply_settings)
+                    ),
+                    width=20,
+                ),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Reset to default",
+                            on_press=lambda x: confirmation_dialog(
+                                "This action will reset all settings on your device to their default values.\n"
+                                "Do you want to proceed?",
+                                single_option=False,
+                                next=self._reset_settings,
+                                nextno=main_menu,
+                            ),
+                        )
+                    ),
+                    width=20,
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=main_menu)), width=20
+                ),
+            ]
+        )
+        main.original_widget = urwid.Padding(
+            CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=48
+        )
+
     def _list_options(self, button, data):
-        body = [urwid.Text(data['title']), urwid.Divider()]
+        body = [urwid.Text(data["title"]), urwid.Divider()]
         self.bgroup = []
-        for choice in data['list']:
+        for choice in data["list"]:
             button = urwid.RadioButton(self.bgroup, choice)
             body.append(button)
-        self.bgroup[self.current_config[data['key']]].toggle_state()
-        body.extend([urwid.Divider(),
-                     urwid.Padding(urwid.Button('Back', on_press=self._set_option, user_data=data), width=8)])
+        self.bgroup[self.current_config[data["key"]]].toggle_state()
+        body.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    urwid.Button("Back", on_press=self._set_option, user_data=data),
+                    width=8,
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
-    
+
     def _set_option(self, button, data):
         states = [c.state for c in self.bgroup]
-        self.current_config[data['key']] = states.index(True)
+        self.current_config[data["key"]] = states.index(True)
         self.bgroup = []
         self.main()
 
     def _apply_settings(self, *args):
         device_config = self._get_device_config()
-        changed = [key for key in self.current_config.keys() if self.current_config[key] != device_config[key]]
+        changed = [
+            key
+            for key in self.current_config.keys()
+            if self.current_config[key] != device_config[key]
+        ]
 
-        for i, addr in enumerate(['i2c_addr', 'i2c_addr_rtc']):
+        for i, addr in enumerate(["i2c_addr", "i2c_addr_rtc"]):
             if addr in changed:
                 value = device_config[addr]
                 try:
@@ -574,155 +819,255 @@ class GeneralTab(object):
                         value = self.current_config[addr]
                     else:
                         self.current_config[addr] = value
-                        return confirmation_dialog("I2C address has to be between 0x08 and 0x77", next=self.main)
+                        return confirmation_dialog(
+                            "I2C address has to be between 0x08 and 0x77",
+                            next=self.main,
+                        )
                 except:
                     pass
                 pijuice.config.SetAddress(i + 1, value)
                 global pijuiceConfigData
-                pijuiceConfigData.setdefault('board', {}).setdefault('general', {})['i2c_addr'+['','_rtc'][i]] = value
+                pijuiceConfigData.setdefault("board", {}).setdefault("general", {})[
+                    "i2c_addr" + ["", "_rtc"][i]
+                ] = value
                 savePiJuiceConfig()
                 _InitPiJuiceInterface()
 
-        if 'run_pin' in changed:
-            pijuice.config.SetRunPinConfig(self.RUN_PIN_VALUES[self.current_config['run_pin']])
+        if "run_pin" in changed:
+            pijuice.config.SetRunPinConfig(
+                self.RUN_PIN_VALUES[self.current_config["run_pin"]]
+            )
 
-        if 'eeprom_addr' in changed:
-            pijuice.config.SetIdEepromAddress(self.EEPROM_ADDRESSES[self.current_config['eeprom_addr']])
-        if 'eeprom_write_unprotected' in changed:
-            pijuice.config.SetIdEepromWriteProtect(not self.current_config['eeprom_write_unprotected'])
+        if "eeprom_addr" in changed:
+            pijuice.config.SetIdEepromAddress(
+                self.EEPROM_ADDRESSES[self.current_config["eeprom_addr"]]
+            )
+        if "eeprom_write_unprotected" in changed:
+            pijuice.config.SetIdEepromWriteProtect(
+                not self.current_config["eeprom_write_unprotected"]
+            )
 
-        if set(['precedence', 'gpio_in_enabled', 'usb_micro_current_limit', 'usb_micro_dpm', 'no_battery_turn_on']) & set(changed):
+        if set(
+            [
+                "precedence",
+                "gpio_in_enabled",
+                "usb_micro_current_limit",
+                "usb_micro_dpm",
+                "no_battery_turn_on",
+            ]
+        ) & set(changed):
             config = {
-                'precedence': self.INPUTS_PRECEDENCE[self.current_config['precedence']],
-                'gpio_in_enabled': self.current_config['gpio_in_enabled'],
-                'no_battery_turn_on': self.current_config['no_battery_turn_on'],
-                'usb_micro_current_limit': self.USB_CURRENT_LIMITS[self.current_config['usb_micro_current_limit']],
-                'usb_micro_dpm': self.USB_MICRO_IN_DPMS[self.current_config['usb_micro_dpm']],
+                "precedence": self.INPUTS_PRECEDENCE[self.current_config["precedence"]],
+                "gpio_in_enabled": self.current_config["gpio_in_enabled"],
+                "no_battery_turn_on": self.current_config["no_battery_turn_on"],
+                "usb_micro_current_limit": self.USB_CURRENT_LIMITS[
+                    self.current_config["usb_micro_current_limit"]
+                ],
+                "usb_micro_dpm": self.USB_MICRO_IN_DPMS[
+                    self.current_config["usb_micro_dpm"]
+                ],
             }
             pijuice.config.SetPowerInputsConfig(config, True)
-        
-        if 'power_reg_mode' in changed:
-            pijuice.config.SetPowerRegulatorMode(self.POWER_REGULATOR_MODES[self.current_config['power_reg_mode']])
-        if 'charging_enabled' in changed:
-            pijuice.config.SetChargingConfig({'charging_enabled': self.current_config['charging_enabled']}, True)
-        
+
+        if "power_reg_mode" in changed:
+            pijuice.config.SetPowerRegulatorMode(
+                self.POWER_REGULATOR_MODES[self.current_config["power_reg_mode"]]
+            )
+        if "charging_enabled" in changed:
+            pijuice.config.SetChargingConfig(
+                {"charging_enabled": self.current_config["charging_enabled"]}, True
+            )
+
         # Give PiJuice MCU sufficient time to change the settings before reading them back
         time.sleep(0.2)
         self.current_config = self._get_device_config()
-        confirmation_dialog("Settings successfully updated", single_option=True, next=self.main)
+        confirmation_dialog(
+            "Settings successfully updated", single_option=True, next=self.main
+        )
 
     def _reset_settings(self, button, is_confirmed):
         if is_confirmed:
-            error = pijuice.config.SetDefaultConfiguration().get('error', 'NO_ERROR')
+            error = pijuice.config.SetDefaultConfiguration().get("error", "NO_ERROR")
             if error == "NO_ERROR":
-                confirmation_dialog("Settings have been reset to their default values", single_option=True, next=main_menu)
+                confirmation_dialog(
+                    "Settings have been reset to their default values",
+                    single_option=True,
+                    next=main_menu,
+                )
             else:
-                confirmation_dialog("Failed to reset settings: " + error, single_option=True, next=main_menu)
+                confirmation_dialog(
+                    "Failed to reset settings: " + error,
+                    single_option=True,
+                    next=main_menu,
+                )
         else:
             self.main()
 
 
 class LEDTab(object):
     if pijuice:
-       LED_FUNCTIONS_OPTIONS = pijuice.config.ledFunctionsOptions
-       LED_NAMES = pijuice.config.leds
+        LED_FUNCTIONS_OPTIONS = pijuice.config.ledFunctionsOptions
+        LED_NAMES = pijuice.config.leds
 
     def __init__(self, *args):
         self._refresh_settings()
         self.main()
-    
+
     def main(self, *args):
         elements = [urwid.Text("LED settings"), urwid.Divider()]
         for i in range(len(self.LED_NAMES)):
-            elements.append(urwid.Padding(
-                            attrmap(urwid.Button(self.LED_NAMES[i], on_press=self.configure_led, user_data=i)),
-                                          width=6))
+            elements.append(
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            self.LED_NAMES[i], on_press=self.configure_led, user_data=i
+                        )
+                    ),
+                    width=6,
+                )
+            )
 
-        elements.extend([urwid.Divider(),
-                         attrmap(urwid.Button("Apply settings", on_press=self._apply_settings)),
-                         attrmap(urwid.Button("Refresh", on_press=self._refresh_settings)),
-                         attrmap(urwid.Button("Back", on_press=main_menu)),
-                         ])
-        main.original_widget = urwid.Padding(CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=18)
-    
+        elements.extend(
+            [
+                urwid.Divider(),
+                attrmap(urwid.Button("Apply settings", on_press=self._apply_settings)),
+                attrmap(urwid.Button("Refresh", on_press=self._refresh_settings)),
+                attrmap(urwid.Button("Back", on_press=main_menu)),
+            ]
+        )
+        main.original_widget = urwid.Padding(
+            CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=18
+        )
+
     def configure_led(self, button, index):
         elements = [urwid.Text("LED " + self.LED_NAMES[index]), urwid.Divider()]
-        colors = ('R', 'G', 'B')
-        button=attrmap(urwid.Button("Function: {value}".format(value=self.current_config[index]['function']),
-                            on_press=self._list_functions, user_data=index))
+        colors = ("R", "G", "B")
+        button = attrmap(
+            urwid.Button(
+                "Function: {value}".format(
+                    value=self.current_config[index]["function"]
+                ),
+                on_press=self._list_functions,
+                user_data=index,
+            )
+        )
         elements.append(urwid.Padding(button, width=30))
         for color in colors:
-            color_edit = urwid.Edit(color + ": ", edit_text=str(self.current_config[index]['color'][colors.index(color)]))
-            urwid.connect_signal(color_edit, 'change', self._set_color, {'color_index': colors.index(color), 'led_index': index})
+            color_edit = urwid.Edit(
+                color + ": ",
+                edit_text=str(self.current_config[index]["color"][colors.index(color)]),
+            )
+            urwid.connect_signal(
+                color_edit,
+                "change",
+                self._set_color,
+                {"color_index": colors.index(color), "led_index": index},
+            )
             elements.append(attrmap(color_edit))
-        elements.extend([urwid.Divider(), urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=8)])
-        main.original_widget = urwid.Filler(urwid.Pile(elements), valign='top')
-    
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=self.main)), width=8
+                ),
+            ]
+        )
+        main.original_widget = urwid.Filler(urwid.Pile(elements), valign="top")
+
     def _get_led_config(self):
         config = []
         for i in range(len(self.LED_NAMES)):
             result = pijuice.config.GetLedConfiguration(self.LED_NAMES[i])
             led_config = {}
             try:
-                led_config['function'] = result['data']['function']
+                led_config["function"] = result["data"]["function"]
             except ValueError:
-                led_config['function'] = self.LED_FUNCTIONS_OPTIONS[0]
-            led_config['color'] = [result['data']['parameter']['r'], result['data']['parameter']['g'], result['data']['parameter']['b']]
+                led_config["function"] = self.LED_FUNCTIONS_OPTIONS[0]
+            led_config["color"] = [
+                result["data"]["parameter"]["r"],
+                result["data"]["parameter"]["g"],
+                result["data"]["parameter"]["b"],
+            ]
             config.append(led_config)
         return config
-    
+
     def _refresh_settings(self, *args):
         self.current_config = self._get_led_config()
-    
+
     def _apply_settings(self, *args):
         device_config = self._get_led_config()
         for i in range(len(self.LED_NAMES)):
             config = {
-                "function": self.current_config[i]['function'],
+                "function": self.current_config[i]["function"],
                 "parameter": {
-                    "r": self.current_config[i]['color'][0],
-                    "g": self.current_config[i]['color'][1],
-                    "b": self.current_config[i]['color'][2],
-                }
+                    "r": self.current_config[i]["color"][0],
+                    "g": self.current_config[i]["color"][1],
+                    "b": self.current_config[i]["color"][2],
+                },
             }
             pijuice.config.SetLedConfiguration(self.LED_NAMES[i], config)
-        
+
         self.current_config = self._get_led_config()
-        confirmation_dialog("Settings successfully updated", single_option=True, next=self.main)
-    
+        confirmation_dialog(
+            "Settings successfully updated", single_option=True, next=self.main
+        )
+
     def _list_functions(self, button, led_index):
-        body = [urwid.Text("Choose function for " + self.LED_NAMES[led_index]), urwid.Divider()]
+        body = [
+            urwid.Text("Choose function for " + self.LED_NAMES[led_index]),
+            urwid.Divider(),
+        ]
         self.bgroup = []
         for choice in self.LED_FUNCTIONS_OPTIONS:
             button = urwid.RadioButton(self.bgroup, choice)
             body.append(attrmap(button))
-        self.bgroup[self.LED_FUNCTIONS_OPTIONS.index(self.current_config[led_index]['function'])].toggle_state()
-        body.extend([urwid.Divider(),
-                     urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_function, user_data=led_index)),
-                                   width=8)])
-        main.original_widget = urwid.Filler(urwid.Pile(body), valign='top')
-    
+        self.bgroup[
+            self.LED_FUNCTIONS_OPTIONS.index(self.current_config[led_index]["function"])
+        ].toggle_state()
+        body.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Back", on_press=self._set_function, user_data=led_index
+                        )
+                    ),
+                    width=8,
+                ),
+            ]
+        )
+        main.original_widget = urwid.Filler(urwid.Pile(body), valign="top")
+
     def _set_function(self, button, led_index):
         states = [c.state for c in self.bgroup]
-        self.current_config[led_index]['function'] = self.LED_FUNCTIONS_OPTIONS[states.index(True)]
+        self.current_config[led_index]["function"] = self.LED_FUNCTIONS_OPTIONS[
+            states.index(True)
+        ]
         self.bgroup = []
         self.configure_led(None, led_index)
 
     def _set_color(self, edit, text, data):
-        led_index = data['led_index']
-        color_index = data['color_index']
+        led_index = data["led_index"]
+        color_index = data["color_index"]
         try:
             value = int(text)
         except ValueError:
-            value = self.current_config[led_index]['color'][color_index]
+            value = self.current_config[led_index]["color"][color_index]
         if value >= 0 and value <= 255:
-            self.current_config[led_index]['color'][color_index] = value
-    
+            self.current_config[led_index]["color"][color_index] = value
+
 
 class ButtonsTab(object):
-    if pijuice == None: _InitPiJuiceInterface()
+    if pijuice == None:
+        _InitPiJuiceInterface()
     if pijuice:
-        FUNCTIONS = ['NO_FUNC'] + pijuice_hard_functions + pijuice_sys_functions + pijuice_user_functions
+        FUNCTIONS = (
+            ["NO_FUNC"]
+            + pijuice_hard_functions
+            + pijuice_sys_functions
+            + pijuice_user_functions
+        )
         BUTTONS = pijuice.config.buttons
         EVENTS = pijuice.config.buttonEvents
 
@@ -734,112 +1079,199 @@ class ButtonsTab(object):
     def main(self, *args):
         elements = [urwid.Text("Buttons"), urwid.Divider()]
         for sw_id in self.BUTTONS:
-            elements.append(urwid.Padding(attrmap(urwid.Button(sw_id, on_press=self.configure_sw, user_data=sw_id)), width=7))
+            elements.append(
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(sw_id, on_press=self.configure_sw, user_data=sw_id)
+                    ),
+                    width=7,
+                )
+            )
         elements.append(urwid.Divider())
         if self.device_config != self.current_config:
-            elements.append(urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=self._apply_settings)), width=18))
-        elements.extend([urwid.Padding(attrmap(urwid.Button("Refresh", on_press=self._refresh_settings)), width=11),
-                         urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=11),
-                         ])
+            elements.append(
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button("Apply settings", on_press=self._apply_settings)
+                    ),
+                    width=18,
+                )
+            )
+        elements.extend(
+            [
+                urwid.Padding(
+                    attrmap(urwid.Button("Refresh", on_press=self._refresh_settings)),
+                    width=11,
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=main_menu)), width=11
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
-    
+
     def configure_sw(self, button, sw_id):
         elements = [urwid.Text("Settings for " + sw_id), urwid.Divider()]
         config = self.current_config[sw_id]
         for action, parameters in config.items():
-            elements.append(attrmap(urwid.Button("{action}: {function}, {parameter}".format(
-                action=action, function=parameters['function'], parameter=parameters['parameter']),
-                on_press=self.configure_action, user_data={'sw_id': sw_id, 'action': action})))
-        elements += [urwid.Divider(), urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=8)]
-        main.original_widget = urwid.Padding(CyclingListBox(
-            urwid.SimpleFocusListWalker(elements)), width=46)
-    
+            elements.append(
+                attrmap(
+                    urwid.Button(
+                        "{action}: {function}, {parameter}".format(
+                            action=action,
+                            function=parameters["function"],
+                            parameter=parameters["parameter"],
+                        ),
+                        on_press=self.configure_action,
+                        user_data={"sw_id": sw_id, "action": action},
+                    )
+                )
+            )
+        elements += [
+            urwid.Divider(),
+            urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=8),
+        ]
+        main.original_widget = urwid.Padding(
+            CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=46
+        )
+
     def configure_action(self, button, data):
-        sw_id = data['sw_id']
-        action = data['action']
-        functions_btn = attrmap(urwid.Button("Function: {}".format(self.current_config[sw_id][action]['function']),
-                                     on_press=self._set_function, user_data={'sw_id': sw_id, 'action': action}))
-        parameter_edit = urwid.Edit("Parameter: ", edit_text=str(self.current_config[sw_id][action]['parameter']))
-        urwid.connect_signal(parameter_edit, 'change', self._set_parameter, {'sw_id': sw_id, 'action': action})
+        sw_id = data["sw_id"]
+        action = data["action"]
+        functions_btn = attrmap(
+            urwid.Button(
+                "Function: {}".format(self.current_config[sw_id][action]["function"]),
+                on_press=self._set_function,
+                user_data={"sw_id": sw_id, "action": action},
+            )
+        )
+        parameter_edit = urwid.Edit(
+            "Parameter: ",
+            edit_text=str(self.current_config[sw_id][action]["parameter"]),
+        )
+        urwid.connect_signal(
+            parameter_edit,
+            "change",
+            self._set_parameter,
+            {"sw_id": sw_id, "action": action},
+        )
         parameter_edit = attrmap(parameter_edit)
-        parameter_text = urwid.Text("Parameter: " + str(self.current_config[sw_id][action]['parameter']))
-        if action != 'PRESS' and action != 'RELEASE':
-           paramline = parameter_edit
+        parameter_text = urwid.Text(
+            "Parameter: " + str(self.current_config[sw_id][action]["parameter"])
+        )
+        if action != "PRESS" and action != "RELEASE":
+            paramline = parameter_edit
         else:
-           paramline = parameter_text
-        back_btn = urwid.Padding(attrmap(urwid.Button("Back", on_press=self.configure_sw, user_data=sw_id)), width=8)
-        elements = [urwid.Text("Set function for {} on {}".format(action, sw_id)),
-                    urwid.Divider(),
-                    functions_btn,
-                    paramline,
-                    urwid.Divider(),
-                    back_btn]
-        main.original_widget = urwid.Padding(CyclingListBox(
-            urwid.SimpleFocusListWalker(elements)), width=37)
-    
+            paramline = parameter_text
+        back_btn = urwid.Padding(
+            attrmap(urwid.Button("Back", on_press=self.configure_sw, user_data=sw_id)),
+            width=8,
+        )
+        elements = [
+            urwid.Text("Set function for {} on {}".format(action, sw_id)),
+            urwid.Divider(),
+            functions_btn,
+            paramline,
+            urwid.Divider(),
+            back_btn,
+        ]
+        main.original_widget = urwid.Padding(
+            CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=37
+        )
+
     def _refresh_settings(self, *args):
         self.device_config = self._get_device_config()
         self.current_config = self._get_device_config()
-        confirmation_dialog("Settings have been refreshed", next=self.main, single_option=True)
-    
+        confirmation_dialog(
+            "Settings have been refreshed", next=self.main, single_option=True
+        )
+
     def _set_function(self, button, data):
-        sw_id = data['sw_id']
-        action = data['action']
-        body = [urwid.Text("Choose function for {} on {}".format(action, sw_id)), urwid.Divider()]
+        sw_id = data["sw_id"]
+        action = data["action"]
+        body = [
+            urwid.Text("Choose function for {} on {}".format(action, sw_id)),
+            urwid.Divider(),
+        ]
         self.bgroup = []
         for function in self.FUNCTIONS:
             button = attrmap(urwid.RadioButton(self.bgroup, function))
             body.append(button)
-        self.bgroup[self.FUNCTIONS.index(self.current_config[sw_id][action]['function'])].toggle_state()
-        body.extend([urwid.Divider(),
-                     urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_function_chosen, user_data=data)), width=8)])
+        self.bgroup[
+            self.FUNCTIONS.index(self.current_config[sw_id][action]["function"])
+        ].toggle_state()
+        body.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Back", on_press=self._on_function_chosen, user_data=data
+                        )
+                    ),
+                    width=8,
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
-    
+
     def _on_function_chosen(self, button, data):
         states = [c.state for c in self.bgroup]
-        self.current_config[data['sw_id']][data['action']]['function'] = self.FUNCTIONS[states.index(True)]
+        self.current_config[data["sw_id"]][data["action"]]["function"] = self.FUNCTIONS[
+            states.index(True)
+        ]
         self.bgroup = []
         self.configure_action(None, data)
-    
+
     def _set_parameter(self, edit, text, data):
-        sw_id = data['sw_id']
-        action = data['action']
+        sw_id = data["sw_id"]
+        action = data["action"]
         # 'PRESS' and 'RELEASE' take no parameter
-        if action != 'PRESS' and action != 'RELEASE':
-            self.current_config[sw_id][action]['parameter'] = text
-    
+        if action != "PRESS" and action != "RELEASE":
+            self.current_config[sw_id][action]["parameter"] = text
+
     def _get_device_config(self):
         config = {}
         got_error = False
         for button in self.BUTTONS:
             button_config = pijuice.config.GetButtonConfiguration(button)
-            if button_config.get('error', 'NO_ERROR'):
-                config[button] = button_config.get('data')
+            if button_config.get("error", "NO_ERROR"):
+                config[button] = button_config.get("data")
             else:
                 config[button] = {}
                 got_error = True
 
         if got_error:
-            confirmation_dialog("Failed to connect to PiJuice", next=main_menu, single_option=True)
+            confirmation_dialog(
+                "Failed to connect to PiJuice", next=main_menu, single_option=True
+            )
         else:
             return config
-    
+
     def _apply_settings(self, *args):
         got_error = False
         errors = []
         for button in self.BUTTONS:
-            error_msg = pijuice.config.SetButtonConfiguration(button, self.current_config[button]).get('error', 'NO_ERROR')
+            error_msg = pijuice.config.SetButtonConfiguration(
+                button, self.current_config[button]
+            ).get("error", "NO_ERROR")
             errors.append(error_msg)
             got_error |= error_msg != "NO_ERROR"
 
         self.device_config = self._get_device_config()
         self.current_config = self._get_device_config()
         if got_error:
-            confirmation_dialog("Failed to apply settings: " + str(errors), next=self.main, single_option=True)
+            confirmation_dialog(
+                "Failed to apply settings: " + str(errors),
+                next=self.main,
+                single_option=True,
+            )
         else:
             notify_service()
-            confirmation_dialog("Settings have been applied", next=self.main, single_option=True)
-    
+            confirmation_dialog(
+                "Settings have been applied", next=self.main, single_option=True
+            )
+
 
 class IOTab(object):
     if pijuice:
@@ -851,85 +1283,156 @@ class IOTab(object):
     def __init__(self):
         self.current_config = self._get_device_config()
         self.main()
-    
+
     def main(self, *args):
         elements = [urwid.Text("IO settings"), urwid.Divider()]
         for i in range(self.IO_PINS_COUNT):
-            elements.append(urwid.Padding(attrmap(urwid.Button("IO" + str(i + 1),
-                                                      on_press=self.configure_io, user_data=i)), width=7))
+            elements.append(
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "IO" + str(i + 1), on_press=self.configure_io, user_data=i
+                        )
+                    ),
+                    width=7,
+                )
+            )
 
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(attrmap(urwid.Button("Apply settings",
-                                                            on_press=self._apply_settings, user_data=self.IO_PINS_COUNT)),
-                                       width=18),
-                         urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
-                        ])
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Apply settings",
+                            on_press=self._apply_settings,
+                            user_data=self.IO_PINS_COUNT,
+                        )
+                    ),
+                    width=18,
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=main_menu)), width=18
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
-    
+
     def configure_io(self, button, pin_id):
         global current_fw_version
         elements = [urwid.Text("IO{}".format(pin_id + 1)), urwid.Divider()]
         pin_config = self.current_config[pin_id]
-        mode = pin_config['mode']
-        pull = pin_config['pull']
-        # < Mode >  
-        mode_select_btn = urwid.Padding(attrmap(urwid.Button("Mode: {}".format(mode),
-                                       on_press=self._select_mode, user_data=pin_id)), width=32)
+        mode = pin_config["mode"]
+        pull = pin_config["pull"]
+        # < Mode >
+        mode_select_btn = urwid.Padding(
+            attrmap(
+                urwid.Button(
+                    "Mode: {}".format(mode),
+                    on_press=self._select_mode,
+                    user_data=pin_id,
+                )
+            ),
+            width=32,
+        )
         # < Pull >
-        pull_select_btn = urwid.Padding(attrmap(urwid.Button("Pull: {}".format(pull),
-                                       on_press=self._select_pull, user_data=pin_id)), width=32)
+        pull_select_btn = urwid.Padding(
+            attrmap(
+                urwid.Button(
+                    "Pull: {}".format(pull),
+                    on_press=self._select_pull,
+                    user_data=pin_id,
+                )
+            ),
+            width=32,
+        )
         elements += [mode_select_btn, pull_select_btn]
         # Edits for vars
         # XXX: Hack to pass var parameters
         if len(self.IO_CONFIG_PARAMS.get(mode, [])) > 0:
             var_config = self.IO_CONFIG_PARAMS[mode][0]
-            var_name = var_config.get('name', '')
-            var_unit = var_config.get('unit')
-            var_type = var_config.get('type', 'str')
-            var_min  = var_config.get('min')
-            var_max  = var_config.get('max')
-            if var_name == 'wakeup' and pin_id == 1 and current_fw_version >= 0x13:
-                if pin_config['wakeup'] == '':
-                    pin_config['wakeup'] = self.IO_CONFIG_PARAMS['DIGITAL_IN'][0]['options'][0]
-                wakeup_select_btn = urwid.Padding(attrmap(urwid.Button("Wakeup: {}".format(pin_config['wakeup']),
-                                                 on_press=self._select_wakeup, user_data=pin_id)), width=32)
+            var_name = var_config.get("name", "")
+            var_unit = var_config.get("unit")
+            var_type = var_config.get("type", "str")
+            var_min = var_config.get("min")
+            var_max = var_config.get("max")
+            if var_name == "wakeup" and pin_id == 1 and current_fw_version >= 0x13:
+                if pin_config["wakeup"] == "":
+                    pin_config["wakeup"] = self.IO_CONFIG_PARAMS["DIGITAL_IN"][0][
+                        "options"
+                    ][0]
+                wakeup_select_btn = urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Wakeup: {}".format(pin_config["wakeup"]),
+                            on_press=self._select_wakeup,
+                            user_data=pin_id,
+                        )
+                    ),
+                    width=32,
+                )
                 elements.append(wakeup_select_btn)
-            elif var_name != 'wakeup':
-                label = "{} [{}-{} {}]: ".format(var_name, var_min, var_max, var_unit) if var_unit else \
-                        "{} [{}-{}]: ".format(var_name, var_min, var_max)
-                if pin_config[var_name] == '':
+            elif var_name != "wakeup":
+                label = (
+                    "{} [{}-{} {}]: ".format(var_name, var_min, var_max, var_unit)
+                    if var_unit
+                    else "{} [{}-{}]: ".format(var_name, var_min, var_max)
+                )
+                if pin_config[var_name] == "":
                     pin_config[var_name] = var_min
                 var_edit_1 = urwid.Edit(label, edit_text=str(pin_config[var_name]))
                 # Validate int/float
-                urwid.connect_signal(var_edit_1, 'change', self.check_value,
-                                     user_args=[pin_id, var_name, var_type, var_min, var_max])
+                urwid.connect_signal(
+                    var_edit_1,
+                    "change",
+                    self.check_value,
+                    user_args=[pin_id, var_name, var_type, var_min, var_max],
+                )
                 elements.append(urwid.Padding(attrmap(var_edit_1), width=32))
 
         if len(self.IO_CONFIG_PARAMS.get(mode, [])) > 1:
             var_config = self.IO_CONFIG_PARAMS[mode][1]
-            var_name = var_config.get('name', '')
-            var_unit = var_config.get('unit')
-            var_type = var_config.get('type', 'str')
-            var_min  = var_config.get('min')
-            var_max  = var_config.get('max')
-            label = "{} [{}-{} {}]: ".format(var_name, var_min, var_max, var_unit) if var_unit else \
-                    "{} [{}-{}]: ".format(var_name, var_min, var_max)
-            if pin_config[var_name] == '':
+            var_name = var_config.get("name", "")
+            var_unit = var_config.get("unit")
+            var_type = var_config.get("type", "str")
+            var_min = var_config.get("min")
+            var_max = var_config.get("max")
+            label = (
+                "{} [{}-{} {}]: ".format(var_name, var_min, var_max, var_unit)
+                if var_unit
+                else "{} [{}-{}]: ".format(var_name, var_min, var_max)
+            )
+            if pin_config[var_name] == "":
                 pin_config[var_name] = var_min
             var_edit_2 = urwid.Edit(label, edit_text=str(pin_config[var_name]))
             # Validate int/float
-            urwid.connect_signal(var_edit_2, 'change', self.check_value,
-                                 user_args=[pin_id, var_name, var_type, var_min, var_max])
+            urwid.connect_signal(
+                var_edit_2,
+                "change",
+                self.check_value,
+                user_args=[pin_id, var_name, var_type, var_min, var_max],
+            )
             elements.append(urwid.Padding(attrmap(var_edit_2), width=32))
 
-        elements += [urwid.Divider(),
-                     urwid.Padding(attrmap(urwid.Button("Apply", on_press=self._apply_settings, user_data=pin_id)), width=9),
-                     urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=9)]
+        elements += [
+            urwid.Divider(),
+            urwid.Padding(
+                attrmap(
+                    urwid.Button(
+                        "Apply", on_press=self._apply_settings, user_data=pin_id
+                    )
+                ),
+                width=9,
+            ),
+            urwid.Padding(attrmap(urwid.Button("Back", on_press=self.main)), width=9),
+        ]
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
-    
+
     def check_value(self, pin_id, var_name, type, var_min, var_max, widget, text):
-        newval = validate_value(text, type, var_min, var_max, self.current_config[pin_id][var_name])
-        self.current_config[pin_id].update({var_name : newval})
+        newval = validate_value(
+            text, type, var_min, var_max, self.current_config[pin_id][var_name]
+        )
+        self.current_config[pin_id].update({var_name: newval})
         if newval != text:
             self.configure_io(None, pin_id)
 
@@ -937,25 +1440,38 @@ class IOTab(object):
         elements = [urwid.Text("Mode for IO{}".format(pin_id + 1)), urwid.Divider()]
         self.bgroup = []
         for choice in self.IO_SUPPORTED_MODES[pin_id + 1]:
-            elements.append(urwid.Padding(attrmap(urwid.RadioButton(self.bgroup, choice)), width=26))
+            elements.append(
+                urwid.Padding(attrmap(urwid.RadioButton(self.bgroup, choice)), width=26)
+            )
         # Toggle the configured state
-        self.bgroup[self.IO_SUPPORTED_MODES[pin_id + 1].index(self.current_config[pin_id]['mode'])].toggle_state()
+        self.bgroup[
+            self.IO_SUPPORTED_MODES[pin_id + 1].index(
+                self.current_config[pin_id]["mode"]
+            )
+        ].toggle_state()
 
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_mode_selected, user_data=pin_id)),
-                                       width=8)
-                        ])
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Back", on_press=self._on_mode_selected, user_data=pin_id
+                        )
+                    ),
+                    width=8,
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
-    
+
     def _on_mode_selected(self, button, pin_id):
         states = [c.state for c in self.bgroup]
         mode = self.IO_SUPPORTED_MODES[pin_id + 1][states.index(True)]
-        pull = self.current_config[pin_id]['pull']
-        config = {
-            'mode': mode, 'pull': pull
-        }
+        pull = self.current_config[pin_id]["pull"]
+        config = {"mode": mode, "pull": pull}
         for var in self.IO_CONFIG_PARAMS.get(mode, []):
-            config[var['name']] = ''
+            config[var["name"]] = ""
         self.current_config[pin_id] = config
         self.bgroup = []
         self.configure_io(None, pin_id)
@@ -964,39 +1480,69 @@ class IOTab(object):
         elements = [urwid.Text("Pull for IO{}".format(pin_id + 1)), urwid.Divider()]
         self.bgroup = []
         for choice in self.IO_PULL_OPTIONS:
-            elements.append(urwid.Padding(attrmap(urwid.RadioButton(self.bgroup, choice)), width=13))
+            elements.append(
+                urwid.Padding(attrmap(urwid.RadioButton(self.bgroup, choice)), width=13)
+            )
         # Toggle the configured state
-        self.bgroup[self.IO_PULL_OPTIONS.index(self.current_config[pin_id]['pull'])].toggle_state()
+        self.bgroup[
+            self.IO_PULL_OPTIONS.index(self.current_config[pin_id]["pull"])
+        ].toggle_state()
 
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_pull_selected, user_data=pin_id)),
-                                       width=8)
-                        ])
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Back", on_press=self._on_pull_selected, user_data=pin_id
+                        )
+                    ),
+                    width=8,
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
-    
+
     def _on_pull_selected(self, button, pin_id):
         states = [c.state for c in self.bgroup]
-        self.current_config[pin_id]['pull'] = self.IO_PULL_OPTIONS[states.index(True)]
+        self.current_config[pin_id]["pull"] = self.IO_PULL_OPTIONS[states.index(True)]
         self.bgroup = []
         self.configure_io(None, pin_id)
 
     def _select_wakeup(self, button, pin_id):
         elements = [urwid.Text("Select Wakeup Option"), urwid.Divider()]
         self.bgroup = []
-        for choice in self.IO_CONFIG_PARAMS['DIGITAL_IN'][0]['options']:
-            elements.append(urwid.Padding(attrmap(urwid.RadioButton(self.bgroup,choice)), width=16))
+        for choice in self.IO_CONFIG_PARAMS["DIGITAL_IN"][0]["options"]:
+            elements.append(
+                urwid.Padding(attrmap(urwid.RadioButton(self.bgroup, choice)), width=16)
+            )
         # Toggle the configured state
-        self.bgroup[self.IO_CONFIG_PARAMS['DIGITAL_IN'][0]['options'].index(self.current_config[pin_id]['wakeup'])].toggle_state()
+        self.bgroup[
+            self.IO_CONFIG_PARAMS["DIGITAL_IN"][0]["options"].index(
+                self.current_config[pin_id]["wakeup"]
+            )
+        ].toggle_state()
 
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_wakeup_selected, user_data=pin_id)),
-                                       width=8)
-                        ])
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Back", on_press=self._on_wakeup_selected, user_data=pin_id
+                        )
+                    ),
+                    width=8,
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def _on_wakeup_selected(self, button, pin_id):
         states = [c.state for c in self.bgroup]
-        self.current_config[pin_id]['wakeup'] = self.IO_CONFIG_PARAMS['DIGITAL_IN'][0]['options'][states.index(True)]
+        self.current_config[pin_id]["wakeup"] = self.IO_CONFIG_PARAMS["DIGITAL_IN"][0][
+            "options"
+        ][states.index(True)]
         self.bgroup = []
         self.configure_io(None, pin_id)
 
@@ -1004,169 +1550,369 @@ class IOTab(object):
         config = []
         for i in range(self.IO_PINS_COUNT):
             result = pijuice.config.GetIoConfiguration(i + 1)
-            if result['error'] != 'NO_ERROR':
-                confirmation_dialog("Unable to connect to device: {}".format(result['error']), next=main_menu, single_option=True)
+            if result["error"] != "NO_ERROR":
+                confirmation_dialog(
+                    "Unable to connect to device: {}".format(result["error"]),
+                    next=main_menu,
+                    single_option=True,
+                )
             else:
-                config.append(result['data'])
+                config.append(result["data"])
         return config
-    
+
     def _apply_settings(self, button, pin_id):
         if pin_id >= self.IO_PINS_COUNT:
             # Apply for all pins
             errors = []
             for i in range(self.IO_PINS_COUNT):
                 error_msg = self._apply_for_pin(i)
-                if error_msg != 'NO_ERROR':
+                if error_msg != "NO_ERROR":
                     errors.append(error_msg)
             if errors:
-                confirmation_dialog("Failed to apply some settings. Error: {}".format(errors), next=self.main, single_option=True)
+                confirmation_dialog(
+                    "Failed to apply some settings. Error: {}".format(errors),
+                    next=self.main,
+                    single_option=True,
+                )
             else:
-                confirmation_dialog("Updated settings for all pins", next=self.main, single_option=True)
+                confirmation_dialog(
+                    "Updated settings for all pins", next=self.main, single_option=True
+                )
         else:
             error_msg = self._apply_for_pin(pin_id)
-            if error_msg != 'NO_ERROR':
-                confirmation_dialog("Failed to apply settings for IO{}. Error: {}".format(pin_id + 1, error_msg), next=self.main, single_option=True)
+            if error_msg != "NO_ERROR":
+                confirmation_dialog(
+                    "Failed to apply settings for IO{}. Error: {}".format(
+                        pin_id + 1, error_msg
+                    ),
+                    next=self.main,
+                    single_option=True,
+                )
             else:
-                confirmation_dialog("Updated settings for IO{}".format(pin_id + 1), next=self.main, single_option=True)
+                confirmation_dialog(
+                    "Updated settings for IO{}".format(pin_id + 1),
+                    next=self.main,
+                    single_option=True,
+                )
 
     def _apply_for_pin(self, pin_id):
-        result = pijuice.config.SetIoConfiguration(pin_id + 1, self.current_config[pin_id], True)
-        return result.get('error', 'NO_ERROR')
+        result = pijuice.config.SetIoConfiguration(
+            pin_id + 1, self.current_config[pin_id], True
+        )
+        return result.get("error", "NO_ERROR")
 
 
 class BatteryProfileTab(object):
     if pijuice:
         TEMP_SENSE_OPTIONS = pijuice.config.batteryTempSenseOptions
         RSOC_ESTIMATION_OPTIONS = pijuice.config.rsocEstimationOptions
-        CHEMISTRY_OPTIONS = pijuice.config.batteryChemistries 
-        EDIT_KEYS = ['capacity', 'chargeCurrent', 'terminationCurrent', 'regulationVoltage', 'cutoffVoltage',
-                     'tempCold', 'tempCool', 'tempWarm', 'tempHot', 'ntcB', 'ntcResistance']
-        EDIT_EXTKEYS = ['ocv10', 'ocv50', 'ocv90', 'r10', 'r50', 'r90']
+        CHEMISTRY_OPTIONS = pijuice.config.batteryChemistries
+        EDIT_KEYS = [
+            "capacity",
+            "chargeCurrent",
+            "terminationCurrent",
+            "regulationVoltage",
+            "cutoffVoltage",
+            "tempCold",
+            "tempCool",
+            "tempWarm",
+            "tempHot",
+            "ntcB",
+            "ntcResistance",
+        ]
+        EDIT_EXTKEYS = ["ocv10", "ocv50", "ocv90", "r10", "r50", "r90"]
 
     def __init__(self, *args):
         global current_fw_version
         self.status_text = ""
         self.custom_values = False
         pijuice.config.SelectBatteryProfiles(current_fw_version)
-        self.BATTERY_PROFILES = pijuice.config.batteryProfiles + ['CUSTOM', 'DEFAULT']
+        self.BATTERY_PROFILES = pijuice.config.batteryProfiles + ["CUSTOM", "DEFAULT"]
         self.refresh()
-    
+
     def main(self, *args):
         global current_fw_version
-        elements = [urwid.Text("Battery settings"),
-                    urwid.Divider(),
-                    urwid.Text("Status: " +  self.status_text),
-                    urwid.Padding(attrmap(urwid.Button("Profile: {}".format(self.profile_name), on_press=self.select_profile)),
-                                  width=25),
-                    urwid.Divider(),
-                    urwid.Padding(attrmap(urwid.CheckBox("Custom", state=self.custom_values,
-                                                         on_state_change=self._toggle_custom_values)),
-                                  width=32)
-                   ]
+        elements = [
+            urwid.Text("Battery settings"),
+            urwid.Divider(),
+            urwid.Text("Status: " + self.status_text),
+            urwid.Padding(
+                attrmap(
+                    urwid.Button(
+                        "Profile: {}".format(self.profile_name),
+                        on_press=self.select_profile,
+                    )
+                ),
+                width=25,
+            ),
+            urwid.Divider(),
+            urwid.Padding(
+                attrmap(
+                    urwid.CheckBox(
+                        "Custom",
+                        state=self.custom_values,
+                        on_state_change=self._toggle_custom_values,
+                    )
+                ),
+                width=32,
+            ),
+        ]
 
-        if self.profile_data == 'INVALID':
-            elements.extend([urwid.Divider(),
-                             urwid.Padding(attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18),
-                             urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=self._apply_settings)), width=18),
-                             urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
-                             ])
+        if self.profile_data == "INVALID":
+            elements.extend(
+                [
+                    urwid.Divider(),
+                    urwid.Padding(
+                        attrmap(urwid.Button("Refresh", on_press=self.refresh)),
+                        width=18,
+                    ),
+                    urwid.Padding(
+                        attrmap(
+                            urwid.Button(
+                                "Apply settings", on_press=self._apply_settings
+                            )
+                        ),
+                        width=18,
+                    ),
+                    urwid.Padding(
+                        attrmap(urwid.Button("Back", on_press=main_menu)), width=18
+                    ),
+                ]
+            )
 
             main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
             return
 
         self.param_edits = [
-            urwid.IntEdit("Capacity [mAh]:           ", default=self.profile_data['capacity']),
-            urwid.IntEdit("Charge current [mA]:      ", default=self.profile_data['chargeCurrent']),
-            urwid.IntEdit("Termination current [mA]: ", default=self.profile_data['terminationCurrent']),
-            urwid.IntEdit("Regulation voltage [mV]:  ", default=self.profile_data['regulationVoltage']),
-            urwid.IntEdit("Cutoff voltage [mV]:      ", default=self.profile_data['cutoffVoltage']),
-            urwid.IntEdit("Cold temperature [C]:     ", default=self.profile_data['tempCold']),
-            urwid.IntEdit("Cool temperature [C]:     ", default=self.profile_data['tempCool']),
-            urwid.IntEdit("Warm temperature [C]:     ", default=self.profile_data['tempWarm']),
-            urwid.IntEdit("Hot temperature [C]:      ", default=self.profile_data['tempHot']),
-            urwid.IntEdit("NTC B constant [1k]:      ", default=self.profile_data['ntcB']),
-            urwid.IntEdit("NTC resistance [ohm]:     ", default=self.profile_data['ntcResistance']),
+            urwid.IntEdit(
+                "Capacity [mAh]:           ", default=self.profile_data["capacity"]
+            ),
+            urwid.IntEdit(
+                "Charge current [mA]:      ", default=self.profile_data["chargeCurrent"]
+            ),
+            urwid.IntEdit(
+                "Termination current [mA]: ",
+                default=self.profile_data["terminationCurrent"],
+            ),
+            urwid.IntEdit(
+                "Regulation voltage [mV]:  ",
+                default=self.profile_data["regulationVoltage"],
+            ),
+            urwid.IntEdit(
+                "Cutoff voltage [mV]:      ", default=self.profile_data["cutoffVoltage"]
+            ),
+            urwid.IntEdit(
+                "Cold temperature [C]:     ", default=self.profile_data["tempCold"]
+            ),
+            urwid.IntEdit(
+                "Cool temperature [C]:     ", default=self.profile_data["tempCool"]
+            ),
+            urwid.IntEdit(
+                "Warm temperature [C]:     ", default=self.profile_data["tempWarm"]
+            ),
+            urwid.IntEdit(
+                "Hot temperature [C]:      ", default=self.profile_data["tempHot"]
+            ),
+            urwid.IntEdit(
+                "NTC B constant [1k]:      ", default=self.profile_data["ntcB"]
+            ),
+            urwid.IntEdit(
+                "NTC resistance [ohm]:     ", default=self.profile_data["ntcResistance"]
+            ),
         ]
         if current_fw_version >= 0x13:
             self.param_edits += [
-                urwid.IntEdit("OCV10 [mV]:               ", default=self.ext_profile_data['ocv10']),
-                urwid.IntEdit("OCV50 [mV]:               ", default=self.ext_profile_data['ocv50']),
-                urwid.IntEdit("OCV90 [mV]:               ", default=self.ext_profile_data['ocv90']),
-                    FloatEdit("R10 [mOhm]:               ", default=self.ext_profile_data['r10']),
-                    FloatEdit("R50 [mOhm]:               ", default=self.ext_profile_data['r50']),
-                    FloatEdit("R90 [mOhm]:               ", default=self.ext_profile_data['r90']),
+                urwid.IntEdit(
+                    "OCV10 [mV]:               ", default=self.ext_profile_data["ocv10"]
+                ),
+                urwid.IntEdit(
+                    "OCV50 [mV]:               ", default=self.ext_profile_data["ocv50"]
+                ),
+                urwid.IntEdit(
+                    "OCV90 [mV]:               ", default=self.ext_profile_data["ocv90"]
+                ),
+                FloatEdit(
+                    "R10 [mOhm]:               ", default=self.ext_profile_data["r10"]
+                ),
+                FloatEdit(
+                    "R50 [mOhm]:               ", default=self.ext_profile_data["r50"]
+                ),
+                FloatEdit(
+                    "R90 [mOhm]:               ", default=self.ext_profile_data["r90"]
+                ),
             ]
 
         for i, edit in enumerate(self.param_edits):
             if i < 11:
-                urwid.connect_signal(edit, 'change',
-                          lambda x, text, idx: self.profile_data.update({self.EDIT_KEYS[idx]: text}), i)
+                urwid.connect_signal(
+                    edit,
+                    "change",
+                    lambda x, text, idx: self.profile_data.update(
+                        {self.EDIT_KEYS[idx]: text}
+                    ),
+                    i,
+                )
             else:
                 # FloatEdit does not need the change signal
                 if isinstance(edit, FloatEdit):
                     continue
-                urwid.connect_signal(edit, 'change',
-                          lambda x, text, idx: self.ext_profile_data.update({self.EDIT_EXTKEYS[idx]: text}), i - 11)
+                urwid.connect_signal(
+                    edit,
+                    "change",
+                    lambda x, text, idx: self.ext_profile_data.update(
+                        {self.EDIT_EXTKEYS[idx]: text}
+                    ),
+                    i - 11,
+                )
 
         if self.custom_values:
-            elements.extend([urwid.Padding(
-                                 attrmap(urwid.Button("Chemistry:              {}".format(
-                                     self.CHEMISTRY_OPTIONS[self.chemistries_idx]), on_press=self.select_chemistry)),
-                                 width=36),
-                            ])
+            elements.extend(
+                [
+                    urwid.Padding(
+                        attrmap(
+                            urwid.Button(
+                                "Chemistry:              {}".format(
+                                    self.CHEMISTRY_OPTIONS[self.chemistries_idx]
+                                ),
+                                on_press=self.select_chemistry,
+                            )
+                        ),
+                        width=36,
+                    ),
+                ]
+            )
             for edit in self.param_edits:
-                elements += [urwid.Padding(attrmap(edit), width=32),]
+                elements += [
+                    urwid.Padding(attrmap(edit), width=32),
+                ]
         else:
             if current_fw_version >= 0x13:
                 elements += [
-                urwid.Text("Chemistry:                " + self.ext_profile_data['chemistry']),
+                    urwid.Text(
+                        "Chemistry:                "
+                        + self.ext_profile_data["chemistry"]
+                    ),
                 ]
             elements += [
-            urwid.Text("Capacity [mAh]:           " + str(self.profile_data['capacity'])),
-            urwid.Text("Charge current [mA]:      " + str(self.profile_data['chargeCurrent'])),
-            urwid.Text("Termination current [mA]: " + str(self.profile_data['terminationCurrent'])),
-            urwid.Text("Regulation voltage [mV]:  " + str(self.profile_data['regulationVoltage'])),
-            urwid.Text("Cutoff voltage [mV]:      " + str(self.profile_data['cutoffVoltage'])),
-            urwid.Text("Cold temperature [C]:     " + str(self.profile_data['tempCold'])),
-            urwid.Text("Cool temperature [C]:     " + str(self.profile_data['tempCool'])),
-            urwid.Text("Warm temperature [C]:     " + str(self.profile_data['tempWarm'])),
-            urwid.Text("Hot temperature [C]:      " + str(self.profile_data['tempHot'])),
-            urwid.Text("NTC B constant [1k]:      " + str(self.profile_data['ntcB'])),
-            urwid.Text("NTC resistance [ohm]:     " + str(self.profile_data['ntcResistance'])),
+                urwid.Text(
+                    "Capacity [mAh]:           " + str(self.profile_data["capacity"])
+                ),
+                urwid.Text(
+                    "Charge current [mA]:      "
+                    + str(self.profile_data["chargeCurrent"])
+                ),
+                urwid.Text(
+                    "Termination current [mA]: "
+                    + str(self.profile_data["terminationCurrent"])
+                ),
+                urwid.Text(
+                    "Regulation voltage [mV]:  "
+                    + str(self.profile_data["regulationVoltage"])
+                ),
+                urwid.Text(
+                    "Cutoff voltage [mV]:      "
+                    + str(self.profile_data["cutoffVoltage"])
+                ),
+                urwid.Text(
+                    "Cold temperature [C]:     " + str(self.profile_data["tempCold"])
+                ),
+                urwid.Text(
+                    "Cool temperature [C]:     " + str(self.profile_data["tempCool"])
+                ),
+                urwid.Text(
+                    "Warm temperature [C]:     " + str(self.profile_data["tempWarm"])
+                ),
+                urwid.Text(
+                    "Hot temperature [C]:      " + str(self.profile_data["tempHot"])
+                ),
+                urwid.Text(
+                    "NTC B constant [1k]:      " + str(self.profile_data["ntcB"])
+                ),
+                urwid.Text(
+                    "NTC resistance [ohm]:     "
+                    + str(self.profile_data["ntcResistance"])
+                ),
             ]
             if current_fw_version >= 0x13:
                 elements += [
-                urwid.Text("OCV10 [mV]:               " + str(self.ext_profile_data['ocv10'])),
-                urwid.Text("OCV50 [mV]:               " + str(self.ext_profile_data['ocv50'])),
-                urwid.Text("OCV90 [mV]:               " + str(self.ext_profile_data['ocv90'])),
-                urwid.Text("R10 [mOhm]:               " + str(self.ext_profile_data['r10'])),
-                urwid.Text("R50 [mOhm]:               " + str(self.ext_profile_data['r50'])),
-                urwid.Text("R90 [mOhm]:               " + str(self.ext_profile_data['r90'])),
+                    urwid.Text(
+                        "OCV10 [mV]:               "
+                        + str(self.ext_profile_data["ocv10"])
+                    ),
+                    urwid.Text(
+                        "OCV50 [mV]:               "
+                        + str(self.ext_profile_data["ocv50"])
+                    ),
+                    urwid.Text(
+                        "OCV90 [mV]:               "
+                        + str(self.ext_profile_data["ocv90"])
+                    ),
+                    urwid.Text(
+                        "R10 [mOhm]:               " + str(self.ext_profile_data["r10"])
+                    ),
+                    urwid.Text(
+                        "R50 [mOhm]:               " + str(self.ext_profile_data["r50"])
+                    ),
+                    urwid.Text(
+                        "R90 [mOhm]:               " + str(self.ext_profile_data["r90"])
+                    ),
                 ]
 
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(
-                             attrmap(urwid.Button("Temperature sense: {}".format(
-                                 self.TEMP_SENSE_OPTIONS[self.temp_sense_profile_idx]), on_press=self.select_sense)),
-                             width=34),
-                         urwid.Divider(),
-                         ])
-        if current_fw_version >= 0x13:
-            elements.extend([
-                urwid.Padding(
-                attrmap(urwid.Button("Rsoc estimation: {}".format(
-                    self.RSOC_ESTIMATION_OPTIONS[self.rsoc_estimation_profile_idx]), on_press=self.select_rsoc_estimate)),
-                    width=34),
+        elements.extend(
+            [
                 urwid.Divider(),
-            ])
-        elements.extend([
-            urwid.Padding(attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18),
-            urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=self._apply_settings)), width=18),
-            urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18),
-        ])
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Temperature sense: {}".format(
+                                self.TEMP_SENSE_OPTIONS[self.temp_sense_profile_idx]
+                            ),
+                            on_press=self.select_sense,
+                        )
+                    ),
+                    width=34,
+                ),
+                urwid.Divider(),
+            ]
+        )
+        if current_fw_version >= 0x13:
+            elements.extend(
+                [
+                    urwid.Padding(
+                        attrmap(
+                            urwid.Button(
+                                "Rsoc estimation: {}".format(
+                                    self.RSOC_ESTIMATION_OPTIONS[
+                                        self.rsoc_estimation_profile_idx
+                                    ]
+                                ),
+                                on_press=self.select_rsoc_estimate,
+                            )
+                        ),
+                        width=34,
+                    ),
+                    urwid.Divider(),
+                ]
+            )
+        elements.extend(
+            [
+                urwid.Padding(
+                    attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18
+                ),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button("Apply settings", on_press=self._apply_settings)
+                    ),
+                    width=18,
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=main_menu)), width=18
+                ),
+            ]
+        )
 
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
-    
+
     def refresh(self, *args):
         global current_fw_version
         self._read_profile_status()
@@ -1176,72 +1922,106 @@ class BatteryProfileTab(object):
             self._read_rsoc_estimation()
             self._read_chemistry()
         self.main()
-    
+
     def _read_profile_data(self, *args):
         global current_fw_version
         config = pijuice.config.GetBatteryProfile()
-        if config['error'] == 'NO_ERROR':
-            self.profile_data = config['data']
+        if config["error"] == "NO_ERROR":
+            self.profile_data = config["data"]
         else:
-            confirmation_dialog("Unable to read battery data. Error: {}".format(config['error']), next=main_menu, single_option=True)
+            confirmation_dialog(
+                "Unable to read battery data. Error: {}".format(config["error"]),
+                next=main_menu,
+                single_option=True,
+            )
         if current_fw_version >= 0x13:
             extconfig = pijuice.config.GetBatteryExtProfile()
-            if extconfig['error'] == 'NO_ERROR':
-                self.ext_profile_data = extconfig['data']
+            if extconfig["error"] == "NO_ERROR":
+                self.ext_profile_data = extconfig["data"]
             else:
-                confirmation_dialog("Unable to read battery data. Error: {}".format(extconfig['error']), next=main_menu, single_option=True)
+                confirmation_dialog(
+                    "Unable to read battery data. Error: {}".format(extconfig["error"]),
+                    next=main_menu,
+                    single_option=True,
+                )
 
- 
     def _read_profile_status(self, *args):
-        self.profile_name = 'CUSTOM'
-        self.status_text = ''
+        self.profile_name = "CUSTOM"
+        self.status_text = ""
         status = pijuice.config.GetBatteryProfileStatus()
-        if status['error'] == 'NO_ERROR':
-            self.profile_status = status['data']
+        if status["error"] == "NO_ERROR":
+            self.profile_status = status["data"]
 
-            if self.profile_status['validity'] == 'VALID':
-                if self.profile_status['origin'] == 'PREDEFINED':
-                    self.profile_name = self.profile_status['profile']
+            if self.profile_status["validity"] == "VALID":
+                if self.profile_status["origin"] == "PREDEFINED":
+                    self.profile_name = self.profile_status["profile"]
             else:
-                self.status_text = 'Invalid battery profile'
+                self.status_text = "Invalid battery profile"
                 return
 
-            if self.profile_status['source'] == 'DIP_SWITCH' and self.profile_status['origin'] == 'PREDEFINED' and self.BATTERY_PROFILES.index(self.profile_name) == 1:
-                self.status_text = 'Default profile'
+            if (
+                self.profile_status["source"] == "DIP_SWITCH"
+                and self.profile_status["origin"] == "PREDEFINED"
+                and self.BATTERY_PROFILES.index(self.profile_name) == 1
+            ):
+                self.status_text = "Default profile"
             else:
-                self.status_text = 'Custom profile by: ' if self.profile_status['origin'] == 'CUSTOM' else 'Profile selected by: '
-                self.status_text += self.profile_status['source']
+                self.status_text = (
+                    "Custom profile by: "
+                    if self.profile_status["origin"] == "CUSTOM"
+                    else "Profile selected by: "
+                )
+                self.status_text += self.profile_status["source"]
         else:
-            confirmation_dialog("Unable to read battery data. Error: {}".format(
-                status['error']), next=main_menu, single_option=True)
+            confirmation_dialog(
+                "Unable to read battery data. Error: {}".format(status["error"]),
+                next=main_menu,
+                single_option=True,
+            )
 
     def _read_temp_sense(self, *args):
         temp_sense_config = pijuice.config.GetBatteryTempSenseConfig()
-        if temp_sense_config['error'] == 'NO_ERROR':
-            self.temp_sense_profile_idx = self.TEMP_SENSE_OPTIONS.index(temp_sense_config['data'])
+        if temp_sense_config["error"] == "NO_ERROR":
+            self.temp_sense_profile_idx = self.TEMP_SENSE_OPTIONS.index(
+                temp_sense_config["data"]
+            )
         else:
-            confirmation_dialog("Unable to read battery data. Error: {}".format(
-                temp_sense_config['error']), next=main_menu, single_option=True)
+            confirmation_dialog(
+                "Unable to read battery data. Error: {}".format(
+                    temp_sense_config["error"]
+                ),
+                next=main_menu,
+                single_option=True,
+            )
 
     def _read_rsoc_estimation(self, *args):
         rsoc_estimation_config = pijuice.config.GetRsocEstimationConfig()
-        if rsoc_estimation_config['error'] == 'NO_ERROR':
-            self.rsoc_estimation_profile_idx = self.RSOC_ESTIMATION_OPTIONS.index(rsoc_estimation_config['data'])
+        if rsoc_estimation_config["error"] == "NO_ERROR":
+            self.rsoc_estimation_profile_idx = self.RSOC_ESTIMATION_OPTIONS.index(
+                rsoc_estimation_config["data"]
+            )
         else:
-            confirmation_dialog("Unable to read battery data. Error: {}".format(
-                rsoc_estimation_config['error']), next=main_menu, single_option=True)
+            confirmation_dialog(
+                "Unable to read battery data. Error: {}".format(
+                    rsoc_estimation_config["error"]
+                ),
+                next=main_menu,
+                single_option=True,
+            )
 
     def _read_chemistry(self, *args):
-        self.chemistries_idx = self.CHEMISTRY_OPTIONS.index(self.ext_profile_data['chemistry'])
+        self.chemistries_idx = self.CHEMISTRY_OPTIONS.index(
+            self.ext_profile_data["chemistry"]
+        )
 
     def _clear_text_edits(self, *args):
         for edit in self.param_edits:
             edit.set_edit_text("")
-    
+
     def _toggle_custom_values(self, *args):
         self.custom_values ^= True
         self.main()
-    
+
     def select_profile(self, *args):
         body = [urwid.Text("Select battery profile"), urwid.Divider()]
         self.bgroup = []
@@ -1249,10 +2029,16 @@ class BatteryProfileTab(object):
             button = urwid.RadioButton(self.bgroup, choice)
             body.append(urwid.Padding(attrmap(button), width=18))
         self.bgroup[self.BATTERY_PROFILES.index(self.profile_name)].toggle_state()
-        body.extend([urwid.Divider(),
-                     urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_profile)), width=8)])
+        body.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=self._set_profile)), width=8
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
-    
+
     def _set_profile(self, *args):
         states = [c.state for c in self.bgroup]
         self.profile_name = self.BATTERY_PROFILES[states.index(True)]
@@ -1266,8 +2052,14 @@ class BatteryProfileTab(object):
             button = urwid.RadioButton(self.bgroup, choice)
             body.append(urwid.Padding(attrmap(button), width=16))
         self.bgroup[self.temp_sense_profile_idx].toggle_state()
-        body.extend([urwid.Divider(),
-                     urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_sense)), width=8)])
+        body.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=self._set_sense)), width=8
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def select_rsoc_estimate(self, *args):
@@ -1277,8 +2069,15 @@ class BatteryProfileTab(object):
             button = urwid.RadioButton(self.bgroup, choice)
             body.append(urwid.Padding(attrmap(button), width=18))
         self.bgroup[self.rsoc_estimation_profile_idx].toggle_state()
-        body.extend([urwid.Divider(),
-                     urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_rsoc_estimation)), width=8)])
+        body.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=self._set_rsoc_estimation)),
+                    width=8,
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def select_chemistry(self, *args):
@@ -1288,8 +2087,14 @@ class BatteryProfileTab(object):
             button = urwid.RadioButton(self.bgroup, choice)
             body.append(urwid.Padding(attrmap(button), width=18))
         self.bgroup[self.chemistries_idx].toggle_state()
-        body.extend([urwid.Divider(),
-                     urwid.Padding(attrmap(urwid.Button('Back', on_press=self._set_chemistry)), width=8)])
+        body.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=self._set_chemistry)), width=8
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def _set_sense(self, *args):
@@ -1311,15 +2116,29 @@ class BatteryProfileTab(object):
         self.main()
 
     def _apply_settings(self, *args):
-        status = pijuice.config.SetBatteryTempSenseConfig(self.TEMP_SENSE_OPTIONS[self.temp_sense_profile_idx])
-        if status['error'] != 'NO_ERROR':
-            confirmation_dialog('Failed to apply temperature sense options. Error: {}'.format(
-                status['error']), next=main_menu, single_option=True)
+        status = pijuice.config.SetBatteryTempSenseConfig(
+            self.TEMP_SENSE_OPTIONS[self.temp_sense_profile_idx]
+        )
+        if status["error"] != "NO_ERROR":
+            confirmation_dialog(
+                "Failed to apply temperature sense options. Error: {}".format(
+                    status["error"]
+                ),
+                next=main_menu,
+                single_option=True,
+            )
 
-        status = pijuice.config.SetRsocEstimationConfig(self.RSOC_ESTIMATION_OPTIONS[self.rsoc_estimation_profile_idx])
-        if status['error'] != 'NO_ERROR':
-            confirmation_dialog('Failed to apply rsoc estimation options. Error: {}'.format(
-                status['error']), next=main_menu, single_option=True)
+        status = pijuice.config.SetRsocEstimationConfig(
+            self.RSOC_ESTIMATION_OPTIONS[self.rsoc_estimation_profile_idx]
+        )
+        if status["error"] != "NO_ERROR":
+            confirmation_dialog(
+                "Failed to apply rsoc estimation options. Error: {}".format(
+                    status["error"]
+                ),
+                next=main_menu,
+                single_option=True,
+            )
 
         if self.custom_values:
             status = self.write_custom_values()
@@ -1327,12 +2146,17 @@ class BatteryProfileTab(object):
         else:
             status = pijuice.config.SetBatteryProfile(self.profile_name)
 
-        if status['error'] != 'NO_ERROR':
-            confirmation_dialog('Failed to apply profile options. Error: {}'.format(
-                status['error']), next=main_menu, single_option=True)
+        if status["error"] != "NO_ERROR":
+            confirmation_dialog(
+                "Failed to apply profile options. Error: {}".format(status["error"]),
+                next=main_menu,
+                single_option=True,
+            )
         else:
-            confirmation_dialog("Settings successfully updated", single_option=True, next=self.refresh)
-    
+            confirmation_dialog(
+                "Settings successfully updated", single_option=True, next=self.refresh
+            )
+
     def write_custom_values(self, *args):
         # Keys for config are given in order of Edit widgets (self.param_edits)
         # edit_keys = ['capacity', 'chargeCurrent', 'terminationCurrent', 'regulationVoltage', 'cutoffVoltage',
@@ -1345,61 +2169,51 @@ class BatteryProfileTab(object):
         REGULATION_VOLTAGE_MAX = 4440
 
         profile = {}
-        profile['capacity'] = int(self.param_edits[0].value())
+        profile["capacity"] = int(self.param_edits[0].value())
 
         charge_current = int(self.param_edits[1].value())
         if charge_current < CHARGE_CURRENT_MIN:
             charge_current = CHARGE_CURRENT_MIN
         elif charge_current > CHARGE_CURRENT_MAX:
             charge_current = CHARGE_CURRENT_MAX
-        profile['chargeCurrent'] = charge_current
+        profile["chargeCurrent"] = charge_current
 
         termination_current = int(self.param_edits[2].value())
         if termination_current < TERMINATION_CURRENT_MIN:
             termination_current = TERMINATION_CURRENT_MIN
         elif termination_current > TERMINATION_CURRENT_MAX:
             termination_current = TERMINATION_CURRENT_MAX
-        profile['terminationCurrent'] = termination_current
+        profile["terminationCurrent"] = termination_current
 
         regulation_voltage = int(self.param_edits[3].value())
         if regulation_voltage < REGULATION_VOLTAGE_MIN:
             regulation_voltage = REGULATION_VOLTAGE_MIN
         elif regulation_voltage > REGULATION_VOLTAGE_MAX:
             regulation_voltage = REGULATION_VOLTAGE_MAX
-        profile['regulationVoltage'] = regulation_voltage
+        profile["regulationVoltage"] = regulation_voltage
 
-        profile['cutoffVoltage'] = int(self.param_edits[4].value())
-        profile['tempCold'] = int(self.param_edits[5].value())
-        profile['tempCool'] = int(self.param_edits[6].value())
-        profile['tempWarm'] = int(self.param_edits[7].value())
-        profile['tempHot'] = int(self.param_edits[8].value())
-        profile['ntcB'] = int(self.param_edits[9].value())
-        profile['ntcResistance'] = int(self.param_edits[10].value())
+        profile["cutoffVoltage"] = int(self.param_edits[4].value())
+        profile["tempCold"] = int(self.param_edits[5].value())
+        profile["tempCool"] = int(self.param_edits[6].value())
+        profile["tempWarm"] = int(self.param_edits[7].value())
+        profile["tempHot"] = int(self.param_edits[8].value())
+        profile["ntcB"] = int(self.param_edits[9].value())
+        profile["ntcResistance"] = int(self.param_edits[10].value())
 
         status = pijuice.config.SetCustomBatteryProfile(profile)
-        if status['error'] != 'NO_ERROR':
+        if status["error"] != "NO_ERROR":
             return status
 
         extprf = {}
-        extprf['chemistry'] = self.CHEMISTRY_OPTIONS[self.chemistries_idx]
-        extprf['ocv10'] = int(self.param_edits[11].value())
-        extprf['ocv50'] = int(self.param_edits[12].value())
-        extprf['ocv90'] = int(self.param_edits[13].value())
-        extprf['r10'] = float(self.param_edits[14].edit_text)
-        extprf['r50'] = float(self.param_edits[15].edit_text)
-        extprf['r90'] = float(self.param_edits[16].edit_text)
+        extprf["chemistry"] = self.CHEMISTRY_OPTIONS[self.chemistries_idx]
+        extprf["ocv10"] = int(self.param_edits[11].value())
+        extprf["ocv50"] = int(self.param_edits[12].value())
+        extprf["ocv90"] = int(self.param_edits[13].value())
+        extprf["r10"] = float(self.param_edits[14].edit_text)
+        extprf["r50"] = float(self.param_edits[15].edit_text)
+        extprf["r90"] = float(self.param_edits[16].edit_text)
 
         return pijuice.config.SetCustomBatteryExtProfile(extprf)
-
-    # def _show_current_config(self, *args):
-    #     current_config = {
-    #         'profile': self.profile_name,
-    #         'profile_status': self.profile_status,
-    #         'profile_data': self.profile_data,
-    #         'status_text': self.status_text,
-    #     }
-    #     main.original_widget = urwid.Filler(urwid.Pile(
-    #         [urwid.Text(str(current_config)), urwid.Button('Back', on_press=self.main)]))
 
 
 class WakeupAlarmTab(object):
@@ -1407,80 +2221,87 @@ class WakeupAlarmTab(object):
         try:
             self.current_config = self._get_alarm()
         except Exception as e:
-            confirmation_dialog("Unable to connect to device: {}".format(
-                str(e)), next=main_menu, single_option=True)
+            confirmation_dialog(
+                "Unable to connect to device: {}".format(str(e)),
+                next=main_menu,
+                single_option=True,
+            )
         else:
-            self.status = 'OK'
+            self.status = "OK"
             self.device_time = self._get_device_time()
             self.main()
 
     def _get_alarm(self, *args):
-        status = {unit: {} for unit in ('day', 'hour', 'minute', 'second')}
+        status = {unit: {} for unit in ("day", "hour", "minute", "second")}
         # Empty by default
-        for unit in ('day', 'hour', 'minute', 'second'):
-            status[unit]['value'] = ''
+        for unit in ("day", "hour", "minute", "second"):
+            status[unit]["value"] = ""
 
         ctr = pijuice.rtcAlarm.GetControlStatus()
-        if ctr['error'] != 'NO_ERROR':
-            raise Exception(ctr['error'])
-        status['enabled'] = ctr['data']['alarm_wakeup_enabled']
+        if ctr["error"] != "NO_ERROR":
+            raise Exception(ctr["error"])
+        status["enabled"] = ctr["data"]["alarm_wakeup_enabled"]
 
         alarm = pijuice.rtcAlarm.GetAlarm()
-        if alarm['error'] != 'NO_ERROR':
-            raise Exception(alarm['error'])
+        if alarm["error"] != "NO_ERROR":
+            raise Exception(alarm["error"])
 
-        alarm = alarm['data']
+        alarm = alarm["data"]
 
-        if 'day' in alarm:
-            status['day']['type'] = 0  # Day number
-            if alarm['day'] == 'EVERY_DAY':
-                status['day']['every_day'] = True
+        if "day" in alarm:
+            status["day"]["type"] = 0  # Day number
+            if alarm["day"] == "EVERY_DAY":
+                status["day"]["every_day"] = True
             else:
-                status['day']['every_day'] = False
-                status['day']['value'] = alarm['day']
-        elif 'weekday' in alarm:
-            status['day']['type'] = 1  # Day of week number
-            if alarm['weekday'] == 'EVERY_DAY':
-                status['day']['every_day'] = True
+                status["day"]["every_day"] = False
+                status["day"]["value"] = alarm["day"]
+        elif "weekday" in alarm:
+            status["day"]["type"] = 1  # Day of week number
+            if alarm["weekday"] == "EVERY_DAY":
+                status["day"]["every_day"] = True
             else:
-                status['day']['every_day'] = False
-                status['day']['value'] = alarm['weekday']
+                status["day"]["every_day"] = False
+                status["day"]["value"] = alarm["weekday"]
 
-        if 'hour' in alarm:
-            if alarm['hour'] == 'EVERY_HOUR':
-                status['hour']['every_hour'] = True
+        if "hour" in alarm:
+            if alarm["hour"] == "EVERY_HOUR":
+                status["hour"]["every_hour"] = True
             else:
-                status['hour']['every_hour'] = False
-                status['hour']['value'] = alarm['hour']
+                status["hour"]["every_hour"] = False
+                status["hour"]["value"] = alarm["hour"]
 
-        if 'minute' in alarm:
-            status['minute']['type'] = 0  # Minute
-            status['minute']['value'] = alarm['minute']
-        elif 'minute_period' in alarm:
-            status['minute']['type'] = 1  # Minute period
-            status['minute']['value'] = alarm['minute_period']
+        if "minute" in alarm:
+            status["minute"]["type"] = 0  # Minute
+            status["minute"]["value"] = alarm["minute"]
+        elif "minute_period" in alarm:
+            status["minute"]["type"] = 1  # Minute period
+            status["minute"]["value"] = alarm["minute_period"]
 
-        if 'second' in alarm:
-            status['second']['value'] = alarm['second']
+        if "second" in alarm:
+            status["second"]["value"] = alarm["second"]
 
         return status
 
     def _get_device_time(self, *args):
-        device_time = ''
+        device_time = ""
         t = pijuice.rtcAlarm.GetTime()
-        if t['error'] == 'NO_ERROR':
-            t = t['data']
-            dt = datetime.datetime(t['year'], t['month'], t['day'], t['hour'], t['minute'], t['second'])
+        if t["error"] == "NO_ERROR":
+            t = t["data"]
+            dt = datetime.datetime(
+                t["year"], t["month"], t["day"], t["hour"], t["minute"], t["second"]
+            )
             dt_fmt = "%a %Y-%m-%d %H:%M:%S"
             device_time = dt.strftime(dt_fmt)
         else:
-            device_time = t['error']
+            device_time = t["error"]
 
         s = pijuice.rtcAlarm.GetControlStatus()
-        if s['error'] == 'NO_ERROR' and s['data']['alarm_flag']:
-            self.status = 'Last: {}:{}:{}'.format(str(t['hour']).rjust(2, '0'),
-                                                  str(t['minute']).rjust(2, '0'),
-                                                  str(t['second']).rjust(2, '0'))
+        if s["error"] == "NO_ERROR" and s["data"]["alarm_flag"]:
+            self.status = "Last: {}:{}:{}".format(
+                str(t["hour"]).rjust(2, "0"),
+                str(t["minute"]).rjust(2, "0"),
+                str(t["second"]).rjust(2, "0"),
+            )
             pijuice.rtcAlarm.ClearAlarmFlag()
         return device_time
 
@@ -1493,106 +2314,227 @@ class WakeupAlarmTab(object):
     def _set_alarm(self, *args):
         loop.remove_alarm(self.alarm_handle)
         alarm = {}
-        if self.current_config['second'].get('value') != None:
-            alarm['second'] = self.current_config['second']['value']
+        if self.current_config["second"].get("value") != None:
+            alarm["second"] = self.current_config["second"]["value"]
 
-        if self.current_config['minute'].get('value') != None:
-            if self.current_config['minute']['type'] == 0:
-                alarm['minute'] = self.current_config['minute']['value']
-            elif self.current_config['minute']['type'] == 1:
-                alarm['minute_period'] = self.current_config['minute']['value']
+        if self.current_config["minute"].get("value") != None:
+            if self.current_config["minute"]["type"] == 0:
+                alarm["minute"] = self.current_config["minute"]["value"]
+            elif self.current_config["minute"]["type"] == 1:
+                alarm["minute_period"] = self.current_config["minute"]["value"]
 
-        if self.current_config['hour'].get('value') != None or self.current_config['hour']['every_hour']:
-            alarm['hour'] = 'EVERY_HOUR' if self.current_config['hour']['every_hour'] else self.current_config['hour']['value']
+        if (
+            self.current_config["hour"].get("value") != None
+            or self.current_config["hour"]["every_hour"]
+        ):
+            alarm["hour"] = (
+                "EVERY_HOUR"
+                if self.current_config["hour"]["every_hour"]
+                else self.current_config["hour"]["value"]
+            )
 
-        if self.current_config['day'].get('value') or self.current_config['day']['every_day']:
-            if self.current_config['day']['type'] == 0:
-                alarm['day'] = 'EVERY_DAY' if self.current_config['day']['every_day'] else self.current_config['day']['value']
-            elif self.current_config['day']['type'] == 1:
-                alarm['weekday'] = 'EVERY_DAY' if self.current_config['day']['every_day'] else self.current_config['day']['value']
+        if (
+            self.current_config["day"].get("value")
+            or self.current_config["day"]["every_day"]
+        ):
+            if self.current_config["day"]["type"] == 0:
+                alarm["day"] = (
+                    "EVERY_DAY"
+                    if self.current_config["day"]["every_day"]
+                    else self.current_config["day"]["value"]
+                )
+            elif self.current_config["day"]["type"] == 1:
+                alarm["weekday"] = (
+                    "EVERY_DAY"
+                    if self.current_config["day"]["every_day"]
+                    else self.current_config["day"]["value"]
+                )
 
         status = pijuice.rtcAlarm.SetAlarm(alarm)
 
-        if status['error'] != 'NO_ERROR':
-            confirmation_dialog('Failed to apply wakeup alarm options. Error: {}'.format(
-                status['error']), next=main_menu, single_option=True)
+        if status["error"] != "NO_ERROR":
+            confirmation_dialog(
+                "Failed to apply wakeup alarm options. Error: {}".format(
+                    status["error"]
+                ),
+                next=main_menu,
+                single_option=True,
+            )
         else:
-            confirmation_dialog('Wakeup alarm has been set successfully.', next=self.main, single_option=True)
+            confirmation_dialog(
+                "Wakeup alarm has been set successfully.",
+                next=self.main,
+                single_option=True,
+            )
 
     def _toggle_wakeup(self, checkbox, state, *args):
-        self.current_config['enabled'] = state
+        self.current_config["enabled"] = state
         ret = pijuice.rtcAlarm.SetWakeupEnabled(state)
-        if ret['error'] != 'NO_ERROR':
-            self.current_config['enabled'] = not state
+        if ret["error"] != "NO_ERROR":
+            self.current_config["enabled"] = not state
             checkbox.set_state(False, do_callback=False)
-            confirmation_dialog('Failed to toggle alarm. Error: {}'.format(ret['error']), next=main_menu, single_option=True)
+            confirmation_dialog(
+                "Failed to toggle alarm. Error: {}".format(ret["error"]),
+                next=main_menu,
+                single_option=True,
+            )
 
     def _set_time(self, *args):
         loop.remove_alarm(self.alarm_handle)
         t = datetime.datetime.utcnow()
-        pijuice.rtcAlarm.SetTime({
-            'second': t.second,
-            'minute': t.minute,
-            'hour': t.hour,
-            'weekday': t.weekday() + 1,
-            'day': t.day,
-            'month': t.month,
-            'year': t.year,
-            'subsecond': t.microsecond // 1000000
-        })
+        pijuice.rtcAlarm.SetTime(
+            {
+                "second": t.second,
+                "minute": t.minute,
+                "hour": t.hour,
+                "weekday": t.weekday() + 1,
+                "day": t.day,
+                "month": t.month,
+                "year": t.year,
+                "subsecond": t.microsecond // 1000000,
+            }
+        )
         self._update_time()
 
     def _set_day_type(self, rb, state, period_type):
         if state:
-            self.current_config['day']['type'] = period_type
+            self.current_config["day"]["type"] = period_type
 
     def _set_minute_type(self, rb, state, period_type):
         if state:
-            self.current_config['minute']['type'] = period_type
+            self.current_config["minute"]["type"] = period_type
 
     def main(self, *args):
         self.time_text = urwid.Text("UTC Time: " + self._get_device_time())
         self.status_text = urwid.Text("Status: " + self.status)
-        wakeup_cbox = urwid.Padding(attrmap(urwid.CheckBox("Wakeup enabled", state=self.current_config['enabled'],
-                                     on_state_change=self._toggle_wakeup)), width=19)
-        elements = [urwid.Text("Wakeup Alarm"),
-                    urwid.Divider(),
-                    self.status_text,
-                    self.time_text,
-                    wakeup_cbox,
-                    urwid.Padding(attrmap(urwid.Button("Set RTC time", on_press=self._set_time)), width=19),
-                    urwid.Divider(),
+        wakeup_cbox = urwid.Padding(
+            attrmap(
+                urwid.CheckBox(
+                    "Wakeup enabled",
+                    state=self.current_config["enabled"],
+                    on_state_change=self._toggle_wakeup,
+                )
+            ),
+            width=19,
+        )
+        elements = [
+            urwid.Text("Wakeup Alarm"),
+            urwid.Divider(),
+            self.status_text,
+            self.time_text,
+            wakeup_cbox,
+            urwid.Padding(
+                attrmap(urwid.Button("Set RTC time", on_press=self._set_time)), width=19
+            ),
+            urwid.Divider(),
         ]
         self.day_bgroup = []
-        day_radio = attrmap(urwid.RadioButton(self.day_bgroup, "Day", on_state_change=self._set_day_type, user_data=0))
-        weekday_radio = attrmap(urwid.RadioButton(self.day_bgroup, "Weekday", on_state_change=self._set_day_type, user_data=1))
-        self.day_bgroup[self.current_config['day']['type']].set_state(True, do_callback=False)
-        day_type_row = urwid.Columns([urwid.Padding(day_radio, width=10), urwid.Padding(weekday_radio, width=15)])
+        day_radio = attrmap(
+            urwid.RadioButton(
+                self.day_bgroup, "Day", on_state_change=self._set_day_type, user_data=0
+            )
+        )
+        weekday_radio = attrmap(
+            urwid.RadioButton(
+                self.day_bgroup,
+                "Weekday",
+                on_state_change=self._set_day_type,
+                user_data=1,
+            )
+        )
+        self.day_bgroup[self.current_config["day"]["type"]].set_state(
+            True, do_callback=False
+        )
+        day_type_row = urwid.Columns(
+            [urwid.Padding(day_radio, width=10), urwid.Padding(weekday_radio, width=15)]
+        )
 
-        day_edit = urwid.Edit("Day: ", edit_text=str(self.current_config['day']['value']))
-        urwid.connect_signal(day_edit, 'change', lambda x, text: self.current_config['day'].update({'value': text}))
-        day_checkbox = urwid.CheckBox("Every day", state=self.current_config['day']['every_day'],
-                                      on_state_change=lambda x, state: self.current_config['day'].update({'every_day': state}))
-        day_value_row = urwid.Columns([urwid.Padding(attrmap(day_edit), width=10), urwid.Padding(attrmap(day_checkbox), width=15)])
+        day_edit = urwid.Edit(
+            "Day: ", edit_text=str(self.current_config["day"]["value"])
+        )
+        urwid.connect_signal(
+            day_edit,
+            "change",
+            lambda x, text: self.current_config["day"].update({"value": text}),
+        )
+        day_checkbox = urwid.CheckBox(
+            "Every day",
+            state=self.current_config["day"]["every_day"],
+            on_state_change=lambda x, state: self.current_config["day"].update(
+                {"every_day": state}
+            ),
+        )
+        day_value_row = urwid.Columns(
+            [
+                urwid.Padding(attrmap(day_edit), width=10),
+                urwid.Padding(attrmap(day_checkbox), width=15),
+            ]
+        )
 
-        hour_edit = urwid.Edit("Hour: ", edit_text=str(self.current_config['hour']['value']))
-        urwid.connect_signal(hour_edit, 'change', lambda x, text: self.current_config['hour'].update({'value': text}))
-        hour_checkbox = urwid.CheckBox("Every hour", state=self.current_config['hour']['every_hour'],
-                                      on_state_change=lambda x, state: self.current_config['hour'].update({'every_hour': state}))
-        hour_value_row = urwid.Columns([urwid.Padding(attrmap(hour_edit), width=10), urwid.Padding(attrmap(hour_checkbox), width=15)])
+        hour_edit = urwid.Edit(
+            "Hour: ", edit_text=str(self.current_config["hour"]["value"])
+        )
+        urwid.connect_signal(
+            hour_edit,
+            "change",
+            lambda x, text: self.current_config["hour"].update({"value": text}),
+        )
+        hour_checkbox = urwid.CheckBox(
+            "Every hour",
+            state=self.current_config["hour"]["every_hour"],
+            on_state_change=lambda x, state: self.current_config["hour"].update(
+                {"every_hour": state}
+            ),
+        )
+        hour_value_row = urwid.Columns(
+            [
+                urwid.Padding(attrmap(hour_edit), width=10),
+                urwid.Padding(attrmap(hour_checkbox), width=15),
+            ]
+        )
 
         self.minute_bgroup = []
-        minute_radio = attrmap(urwid.RadioButton(self.minute_bgroup, "Minute", on_state_change=self._set_minute_type, user_data=0))
-        minute_period_radio = attrmap(urwid.RadioButton(
-            self.minute_bgroup, "Minutes period", on_state_change=self._set_minute_type, user_data=1))
-        self.minute_bgroup[self.current_config['minute']['type']].toggle_state()
-        minute_type_row = urwid.Columns([urwid.Padding(minute_radio, width=11), urwid.Padding(minute_period_radio, width=19)])
+        minute_radio = attrmap(
+            urwid.RadioButton(
+                self.minute_bgroup,
+                "Minute",
+                on_state_change=self._set_minute_type,
+                user_data=0,
+            )
+        )
+        minute_period_radio = attrmap(
+            urwid.RadioButton(
+                self.minute_bgroup,
+                "Minutes period",
+                on_state_change=self._set_minute_type,
+                user_data=1,
+            )
+        )
+        self.minute_bgroup[self.current_config["minute"]["type"]].toggle_state()
+        minute_type_row = urwid.Columns(
+            [
+                urwid.Padding(minute_radio, width=11),
+                urwid.Padding(minute_period_radio, width=19),
+            ]
+        )
 
-        minute_edit = urwid.Edit("Minute: ", edit_text=str(self.current_config['minute']['value']))
-        urwid.connect_signal(minute_edit, 'change', lambda x, text: self.current_config['minute'].update({'value': text}))
+        minute_edit = urwid.Edit(
+            "Minute: ", edit_text=str(self.current_config["minute"]["value"])
+        )
+        urwid.connect_signal(
+            minute_edit,
+            "change",
+            lambda x, text: self.current_config["minute"].update({"value": text}),
+        )
 
-        second_edit = urwid.Edit("Second: ", edit_text=str(self.current_config['second']['value']))
-        urwid.connect_signal(second_edit, 'change', lambda x, text: self.current_config['second'].update({'value': text}))
+        second_edit = urwid.Edit(
+            "Second: ", edit_text=str(self.current_config["second"]["value"])
+        )
+        urwid.connect_signal(
+            second_edit,
+            "change",
+            lambda x, text: self.current_config["second"].update({"value": text}),
+        )
 
         elements += [
             day_type_row,
@@ -1603,8 +2545,12 @@ class WakeupAlarmTab(object):
             urwid.Padding(attrmap(minute_edit), width=11),
             urwid.Padding(attrmap(second_edit), width=11),
             urwid.Divider(),
-            urwid.Padding(attrmap(urwid.Button("Set alarm", on_press=self._set_alarm)), width=13),
-            urwid.Padding(attrmap(urwid.Button("Back", on_press=self._goto_main_menu)), width=13)
+            urwid.Padding(
+                attrmap(urwid.Button("Set alarm", on_press=self._set_alarm)), width=13
+            ),
+            urwid.Padding(
+                attrmap(urwid.Button("Back", on_press=self._goto_main_menu)), width=13
+            ),
         ]
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
         self.alarm_handle = loop.set_alarm_in(1, self._update_time)
@@ -1612,6 +2558,7 @@ class WakeupAlarmTab(object):
     def _goto_main_menu(self, *args):
         loop.remove_alarm(self.alarm_handle)
         main_menu()
+
 
 class SystemTaskTab(object):
     def __init__(self, *args):
@@ -1622,148 +2569,248 @@ class SystemTaskTab(object):
 
     def main(self, *args):
         global pijuiceConfigData
-        elements = [urwid.Text("System Task"),
-                    urwid.Divider()
-        ]
+        elements = [urwid.Text("System Task"), urwid.Divider()]
 
         ## System Task ##
-        if not ('system_task' in pijuiceConfigData):
-            pijuiceConfigData['system_task'] = {}
-        if not ('enabled' in pijuiceConfigData['system_task']):
-            pijuiceConfigData['system_task']['enabled'] = False
-        elements.extend([attrmap(urwid.CheckBox('System task enabled',
-                                  state=pijuiceConfigData['system_task']['enabled'],
-                                  on_state_change = lambda x, state: pijuiceConfigData['system_task'].update({'enabled':state}))),
-                         urwid.Divider()
-                        ])
+        if not ("system_task" in pijuiceConfigData):
+            pijuiceConfigData["system_task"] = {}
+        if not ("enabled" in pijuiceConfigData["system_task"]):
+            pijuiceConfigData["system_task"]["enabled"] = False
+        elements.extend(
+            [
+                attrmap(
+                    urwid.CheckBox(
+                        "System task enabled",
+                        state=pijuiceConfigData["system_task"]["enabled"],
+                        on_state_change=lambda x, state: pijuiceConfigData[
+                            "system_task"
+                        ].update({"enabled": state}),
+                    )
+                ),
+                urwid.Divider(),
+            ]
+        )
 
         ## Watchdog ##
-        if not('watchdog' in pijuiceConfigData['system_task']):
-            pijuiceConfigData['system_task']['watchdog'] = {}
-        if not('enabled' in pijuiceConfigData['system_task']['watchdog']):
-            pijuiceConfigData['system_task']['watchdog']['enabled'] = False
-        self.wdenabled = pijuiceConfigData['system_task']['watchdog']['enabled']
-        if not('period' in pijuiceConfigData['system_task']['watchdog']):
-            pijuiceConfigData['system_task']['watchdog']['period'] = 4
+        if not ("watchdog" in pijuiceConfigData["system_task"]):
+            pijuiceConfigData["system_task"]["watchdog"] = {}
+        if not ("enabled" in pijuiceConfigData["system_task"]["watchdog"]):
+            pijuiceConfigData["system_task"]["watchdog"]["enabled"] = False
+        self.wdenabled = pijuiceConfigData["system_task"]["watchdog"]["enabled"]
+        if not ("period" in pijuiceConfigData["system_task"]["watchdog"]):
+            pijuiceConfigData["system_task"]["watchdog"]["period"] = 4
         if current_fw_version >= 0x15:
             ret = pijuice.power.GetWatchdog()
             self.watchdogRestoreEn = False
-            if ret['error'] == 'NO_ERROR': self.watchdogRestoreEn = ret['non_volatile']
-        wdCheckBox = attrmap(urwid.CheckBox('Watchdog', state=self.wdenabled,
-                             on_state_change=self._toggle_wdenabled))
-        wdperiodEdit = urwid.IntEdit("Expire period [minutes]: ", default = pijuiceConfigData['system_task']['watchdog']['period']) 
-        urwid.connect_signal(wdperiodEdit, 'change', self.validate_wdperiod)
+            if ret["error"] == "NO_ERROR":
+                self.watchdogRestoreEn = ret["non_volatile"]
+        wdCheckBox = attrmap(
+            urwid.CheckBox(
+                "Watchdog", state=self.wdenabled, on_state_change=self._toggle_wdenabled
+            )
+        )
+        wdperiodEdit = urwid.IntEdit(
+            "Expire period [minutes]: ",
+            default=pijuiceConfigData["system_task"]["watchdog"]["period"],
+        )
+        urwid.connect_signal(wdperiodEdit, "change", self.validate_wdperiod)
         wdperiodEditItem = attrmap(wdperiodEdit)
-        wdperiodTextItem = attrmap(urwid.Text("Expire period [minutes]: " + str(pijuiceConfigData['system_task']['watchdog']['period'])))
-        wdperiodItem = wdperiodEditItem if self.wdenabled else wdperiodTextItem 
+        wdperiodTextItem = attrmap(
+            urwid.Text(
+                "Expire period [minutes]: "
+                + str(pijuiceConfigData["system_task"]["watchdog"]["period"])
+            )
+        )
+        wdperiodItem = wdperiodEditItem if self.wdenabled else wdperiodTextItem
         if current_fw_version >= 0x15:
-            wdRestoreCheckBox = attrmap(urwid.CheckBox('Restore', state=self.watchdogRestoreEn, on_state_change=self._toggle_wdrestore))
-            wdperiodRow = urwid.Columns([(24,wdCheckBox), (23,wdperiodItem), (11,wdRestoreCheckBox)])
+            wdRestoreCheckBox = attrmap(
+                urwid.CheckBox(
+                    "Restore",
+                    state=self.watchdogRestoreEn,
+                    on_state_change=self._toggle_wdrestore,
+                )
+            )
+            wdperiodRow = urwid.Columns(
+                [(24, wdCheckBox), (23, wdperiodItem), (11, wdRestoreCheckBox)]
+            )
         else:
-            wdperiodRow = urwid.Columns([(24,wdCheckBox), (34,wdperiodItem)])
+            wdperiodRow = urwid.Columns([(24, wdCheckBox), (34, wdperiodItem)])
         elements.extend([wdperiodRow, urwid.Divider()])
-       
-        ## Wakeup on charge ##
-        if not('wakeup_on_charge' in pijuiceConfigData['system_task']):
-            pijuiceConfigData['system_task']['wakeup_on_charge'] = {}
-        if not('enabled' in pijuiceConfigData['system_task']['wakeup_on_charge']):
-            pijuiceConfigData['system_task']['wakeup_on_charge']['enabled'] = False
-        self.wkupenabled = pijuiceConfigData['system_task']['wakeup_on_charge']['enabled']
-        if not('trigger_level' in pijuiceConfigData['system_task']['wakeup_on_charge']):
-            pijuiceConfigData['system_task']['wakeup_on_charge']['trigger_level'] = 50
 
-        self.wkupOnChargeLevel = pijuiceConfigData['system_task']['wakeup_on_charge']['trigger_level']
+        ## Wakeup on charge ##
+        if not ("wakeup_on_charge" in pijuiceConfigData["system_task"]):
+            pijuiceConfigData["system_task"]["wakeup_on_charge"] = {}
+        if not ("enabled" in pijuiceConfigData["system_task"]["wakeup_on_charge"]):
+            pijuiceConfigData["system_task"]["wakeup_on_charge"]["enabled"] = False
+        self.wkupenabled = pijuiceConfigData["system_task"]["wakeup_on_charge"][
+            "enabled"
+        ]
+        if not (
+            "trigger_level" in pijuiceConfigData["system_task"]["wakeup_on_charge"]
+        ):
+            pijuiceConfigData["system_task"]["wakeup_on_charge"]["trigger_level"] = 50
+
+        self.wkupOnChargeLevel = pijuiceConfigData["system_task"]["wakeup_on_charge"][
+            "trigger_level"
+        ]
 
         if current_fw_version >= 0x15:
-
             ret = pijuice.power.GetWakeUpOnCharge()
             self.wakeupRestoreEn = False
 
-            if ret['error'] == 'NO_ERROR':
-                self.wakeupRestoreEn = ret['non_volatile']
+            if ret["error"] == "NO_ERROR":
+                self.wakeupRestoreEn = ret["non_volatile"]
                 if self.wakeupRestoreEn:
-                    self.wkupOnChargeLevel = ret['data']
+                    self.wkupOnChargeLevel = ret["data"]
 
-        wkupCheckBox = attrmap(urwid.CheckBox('Wakeup on charge', state=self.wkupenabled,
-                          on_state_change=self._toggle_wkupenabled))
+        wkupCheckBox = attrmap(
+            urwid.CheckBox(
+                "Wakeup on charge",
+                state=self.wkupenabled,
+                on_state_change=self._toggle_wkupenabled,
+            )
+        )
 
-        wkuplevelEdit = urwid.IntEdit("Trigger level [%]: ", default = self.wkupOnChargeLevel)
-        urwid.connect_signal(wkuplevelEdit, 'change', self.validate_wkuplevel)
+        wkuplevelEdit = urwid.IntEdit(
+            "Trigger level [%]: ", default=self.wkupOnChargeLevel
+        )
+        urwid.connect_signal(wkuplevelEdit, "change", self.validate_wkuplevel)
         wkuplevelEditItem = attrmap(wkuplevelEdit)
-        wkuplevelTextItem = attrmap(urwid.Text("Trigger level [%]: " + str(self.wkupOnChargeLevel)))
+        wkuplevelTextItem = attrmap(
+            urwid.Text("Trigger level [%]: " + str(self.wkupOnChargeLevel))
+        )
         wkuplevelItem = wkuplevelEditItem if self.wkupenabled else wkuplevelTextItem
 
         if current_fw_version >= 0x15:
-            wkupRestoreCheckBox = attrmap(urwid.CheckBox('Restore', state=self.wakeupRestoreEn, on_state_change=self._toggle_wkuprestore))
-            wkuplevelRow = urwid.Columns([(24,wkupCheckBox), (23,wkuplevelItem), (11,wkupRestoreCheckBox)])
+            wkupRestoreCheckBox = attrmap(
+                urwid.CheckBox(
+                    "Restore",
+                    state=self.wakeupRestoreEn,
+                    on_state_change=self._toggle_wkuprestore,
+                )
+            )
+            wkuplevelRow = urwid.Columns(
+                [(24, wkupCheckBox), (23, wkuplevelItem), (11, wkupRestoreCheckBox)]
+            )
         else:
-            wkuplevelRow = urwid.Columns([(24,wkupCheckBox), (34,wkuplevelItem)])
+            wkuplevelRow = urwid.Columns([(24, wkupCheckBox), (34, wkuplevelItem)])
 
-        elements.extend([wkuplevelRow,
-                         urwid.Divider()])
+        elements.extend([wkuplevelRow, urwid.Divider()])
 
         ## Minimum charge ##
-        if not('min_charge' in pijuiceConfigData['system_task']):
-            pijuiceConfigData['system_task']['min_charge'] = {}
-        if not('enabled' in pijuiceConfigData['system_task']['min_charge']):
-            pijuiceConfigData['system_task']['min_charge']['enabled'] = False
-        self.minchgenabled = pijuiceConfigData['system_task']['min_charge']['enabled']
-        if not('threshold' in pijuiceConfigData['system_task']['min_charge']):
-            pijuiceConfigData['system_task']['min_charge']['threshold'] = 10
-        minchgCheckBox = attrmap(urwid.CheckBox('Min charge', state=self.minchgenabled,
-                          on_state_change=self._toggle_minchgenabled))
-        thresholdEdit = urwid.IntEdit("Threshold [%]: ", default = pijuiceConfigData['system_task']['min_charge']['threshold'])
-        urwid.connect_signal(thresholdEdit, 'change', self.validate_minchglevel)
+        if not ("min_charge" in pijuiceConfigData["system_task"]):
+            pijuiceConfigData["system_task"]["min_charge"] = {}
+        if not ("enabled" in pijuiceConfigData["system_task"]["min_charge"]):
+            pijuiceConfigData["system_task"]["min_charge"]["enabled"] = False
+        self.minchgenabled = pijuiceConfigData["system_task"]["min_charge"]["enabled"]
+        if not ("threshold" in pijuiceConfigData["system_task"]["min_charge"]):
+            pijuiceConfigData["system_task"]["min_charge"]["threshold"] = 10
+        minchgCheckBox = attrmap(
+            urwid.CheckBox(
+                "Min charge",
+                state=self.minchgenabled,
+                on_state_change=self._toggle_minchgenabled,
+            )
+        )
+        thresholdEdit = urwid.IntEdit(
+            "Threshold [%]: ",
+            default=pijuiceConfigData["system_task"]["min_charge"]["threshold"],
+        )
+        urwid.connect_signal(thresholdEdit, "change", self.validate_minchglevel)
         thresholdEditItem = attrmap(thresholdEdit)
-        thresholdTextItem = attrmap(urwid.Text("Threshold [%]: " + str(pijuiceConfigData['system_task']['min_charge']['threshold'])))
+        thresholdTextItem = attrmap(
+            urwid.Text(
+                "Threshold [%]: "
+                + str(pijuiceConfigData["system_task"]["min_charge"]["threshold"])
+            )
+        )
         thresholdItem = thresholdEditItem if self.minchgenabled else thresholdTextItem
-        thresholdRow = urwid.Columns([(24,minchgCheckBox), (34,thresholdItem)])
-        elements.extend([thresholdRow,
-                         urwid.Divider()])
+        thresholdRow = urwid.Columns([(24, minchgCheckBox), (34, thresholdItem)])
+        elements.extend([thresholdRow, urwid.Divider()])
 
         ## Min Battery voltage ##
-        if not('min_bat_voltage' in pijuiceConfigData['system_task']):
-            pijuiceConfigData['system_task']['min_bat_voltage'] = {}
-        if not('enabled' in pijuiceConfigData['system_task']['min_bat_voltage']):
-            pijuiceConfigData['system_task']['min_bat_voltage']['enabled'] = False
-        self.minbatvenabled = pijuiceConfigData['system_task']['min_bat_voltage']['enabled']
-        if not('threshold' in pijuiceConfigData['system_task']['min_bat_voltage']):
-            pijuiceConfigData['system_task']['min_bat_voltage']['threshold'] = 3.3
-        minbatvCheckBox = attrmap(urwid.CheckBox('Min battery voltage', state=self.minbatvenabled,
-                           on_state_change=self._toggle_minbatvenabled))
-        vthresholdEdit = FloatEdit(default = str(pijuiceConfigData['system_task']['min_bat_voltage']['threshold']))
-        urwid.connect_signal(vthresholdEdit, 'change', self.validate_minbatvlevel)
+        if not ("min_bat_voltage" in pijuiceConfigData["system_task"]):
+            pijuiceConfigData["system_task"]["min_bat_voltage"] = {}
+        if not ("enabled" in pijuiceConfigData["system_task"]["min_bat_voltage"]):
+            pijuiceConfigData["system_task"]["min_bat_voltage"]["enabled"] = False
+        self.minbatvenabled = pijuiceConfigData["system_task"]["min_bat_voltage"][
+            "enabled"
+        ]
+        if not ("threshold" in pijuiceConfigData["system_task"]["min_bat_voltage"]):
+            pijuiceConfigData["system_task"]["min_bat_voltage"]["threshold"] = 3.3
+        minbatvCheckBox = attrmap(
+            urwid.CheckBox(
+                "Min battery voltage",
+                state=self.minbatvenabled,
+                on_state_change=self._toggle_minbatvenabled,
+            )
+        )
+        vthresholdEdit = FloatEdit(
+            default=str(
+                pijuiceConfigData["system_task"]["min_bat_voltage"]["threshold"]
+            )
+        )
+        urwid.connect_signal(vthresholdEdit, "change", self.validate_minbatvlevel)
         vthresholdEditItem = attrmap(vthresholdEdit)
-        vthresholdTextItem = attrmap(urwid.Text(str(pijuiceConfigData['system_task']['min_bat_voltage']['threshold'])))
-        vthresholdItem = vthresholdEditItem if self.minbatvenabled else vthresholdTextItem
-        vthresholdRow = urwid.Columns([(24,minbatvCheckBox), (34,vthresholdItem)])
-        elements.extend([vthresholdRow,
-                         urwid.Divider()])
+        vthresholdTextItem = attrmap(
+            urwid.Text(
+                str(pijuiceConfigData["system_task"]["min_bat_voltage"]["threshold"])
+            )
+        )
+        vthresholdItem = (
+            vthresholdEditItem if self.minbatvenabled else vthresholdTextItem
+        )
+        vthresholdRow = urwid.Columns([(24, minbatvCheckBox), (34, vthresholdItem)])
+        elements.extend([vthresholdRow, urwid.Divider()])
 
         ## Software Halt Power Off ##
-        if not('ext_halt_power_off' in pijuiceConfigData['system_task']):
-            pijuiceConfigData['system_task']['ext_halt_power_off'] = {}
-        if not('enabled' in pijuiceConfigData['system_task']['ext_halt_power_off']):
-            pijuiceConfigData['system_task']['ext_halt_power_off']['enabled'] = False
-        self.exthaltenabled = pijuiceConfigData['system_task']['ext_halt_power_off']['enabled']
-        if not('period' in pijuiceConfigData['system_task']['ext_halt_power_off']):
-            pijuiceConfigData['system_task']['ext_halt_power_off']['period'] = 10
-        exthaltCheckBox = attrmap(urwid.CheckBox('Software Halt Power Off', state=self.exthaltenabled,
-                          on_state_change=self._toggle_exthaltenabled))
-        periodEdit = urwid.IntEdit("Delay period [seconds]: ", default = pijuiceConfigData['system_task']['ext_halt_power_off']['period'])
-        urwid.connect_signal(periodEdit, 'change', self.validate_exthaltdelay)
+        if not ("ext_halt_power_off" in pijuiceConfigData["system_task"]):
+            pijuiceConfigData["system_task"]["ext_halt_power_off"] = {}
+        if not ("enabled" in pijuiceConfigData["system_task"]["ext_halt_power_off"]):
+            pijuiceConfigData["system_task"]["ext_halt_power_off"]["enabled"] = False
+        self.exthaltenabled = pijuiceConfigData["system_task"]["ext_halt_power_off"][
+            "enabled"
+        ]
+        if not ("period" in pijuiceConfigData["system_task"]["ext_halt_power_off"]):
+            pijuiceConfigData["system_task"]["ext_halt_power_off"]["period"] = 10
+        exthaltCheckBox = attrmap(
+            urwid.CheckBox(
+                "Software Halt Power Off",
+                state=self.exthaltenabled,
+                on_state_change=self._toggle_exthaltenabled,
+            )
+        )
+        periodEdit = urwid.IntEdit(
+            "Delay period [seconds]: ",
+            default=pijuiceConfigData["system_task"]["ext_halt_power_off"]["period"],
+        )
+        urwid.connect_signal(periodEdit, "change", self.validate_exthaltdelay)
         periodEditItem = attrmap(periodEdit)
-        periodTextItem = attrmap(urwid.Text("Delay period [seconds]: " + str(pijuiceConfigData['system_task']['ext_halt_power_off']['period'])))
+        periodTextItem = attrmap(
+            urwid.Text(
+                "Delay period [seconds]: "
+                + str(pijuiceConfigData["system_task"]["ext_halt_power_off"]["period"])
+            )
+        )
         periodItem = periodEditItem if self.exthaltenabled else periodTextItem
-        periodRow = urwid.Columns([(24,exthaltCheckBox), (34,periodItem)])
-        elements.extend([periodRow,
-                         urwid.Divider()])
+        periodRow = urwid.Columns([(24, exthaltCheckBox), (34, periodItem)])
+        elements.extend([periodRow, urwid.Divider()])
 
         ## Footer ##
-        elements.extend([urwid.Padding(attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18),
-                         urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)), width=18),
-                         urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
-                         ])
+        elements.extend(
+            [
+                urwid.Padding(
+                    attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)),
+                    width=18,
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=main_menu)), width=18
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def refresh(self, *args):
@@ -1774,145 +2821,221 @@ class SystemTaskTab(object):
     def _toggle_wdenabled(self, *args):
         global pijuiceConfigData
         self.wdenabled ^= True
-        pijuiceConfigData['system_task']['watchdog']['enabled'] = self.wdenabled
+        pijuiceConfigData["system_task"]["watchdog"]["enabled"] = self.wdenabled
         self.main()
 
     def _toggle_wdrestore(self, *args):
         global pijuiceConfigData
         if self.watchdogRestoreEn:
             ret = pijuice.power.SetWatchdog(0, True)
-            if ret['error'] == 'NO_ERROR': self.watchdogRestoreEn = False
-        elif pijuiceConfigData['system_task']['watchdog']['enabled']:
-            ret = pijuice.power.SetWatchdog(pijuiceConfigData['system_task']['watchdog']['period'], True)
-            if ret['error'] == 'NO_ERROR': self.watchdogRestoreEn = True
+            if ret["error"] == "NO_ERROR":
+                self.watchdogRestoreEn = False
+        elif pijuiceConfigData["system_task"]["watchdog"]["enabled"]:
+            ret = pijuice.power.SetWatchdog(
+                pijuiceConfigData["system_task"]["watchdog"]["period"], True
+            )
+            if ret["error"] == "NO_ERROR":
+                self.watchdogRestoreEn = True
         self.main()
-        
+
     def _toggle_wkupenabled(self, *args):
         global pijuiceConfigData
         self.wkupenabled ^= True
-        pijuiceConfigData['system_task']['wakeup_on_charge']['enabled'] = self.wkupenabled
+        pijuiceConfigData["system_task"]["wakeup_on_charge"]["enabled"] = (
+            self.wkupenabled
+        )
         self.main()
-        
+
     def _toggle_wkuprestore(self, *args):
         global pijuiceConfigData
         if self.wakeupRestoreEn:
-            ret = pijuice.power.SetWakeUpOnCharge('DISABLED', True)
-            if ret['error'] == 'NO_ERROR': self.wakeupRestoreEn = False
+            ret = pijuice.power.SetWakeUpOnCharge("DISABLED", True)
+            if ret["error"] == "NO_ERROR":
+                self.wakeupRestoreEn = False
         else:
-            ret = pijuice.power.SetWakeUpOnCharge(pijuiceConfigData['system_task']['wakeup_on_charge']['trigger_level'], True)
-            if ret['error'] == 'NO_ERROR': self.wakeupRestoreEn = True
+            ret = pijuice.power.SetWakeUpOnCharge(
+                pijuiceConfigData["system_task"]["wakeup_on_charge"]["trigger_level"],
+                True,
+            )
+            if ret["error"] == "NO_ERROR":
+                self.wakeupRestoreEn = True
         self.main()
 
     def _toggle_minchgenabled(self, *args):
         global pijuiceConfigData
         self.minchgenabled ^= True
-        pijuiceConfigData['system_task']['min_charge']['enabled'] = self.minchgenabled
+        pijuiceConfigData["system_task"]["min_charge"]["enabled"] = self.minchgenabled
         self.main()
 
     def _toggle_minbatvenabled(self, *args):
         global pijuiceConfigData
         self.minbatvenabled ^= True
-        pijuiceConfigData['system_task']['min_bat_voltage']['enabled'] = self.minbatvenabled
+        pijuiceConfigData["system_task"]["min_bat_voltage"]["enabled"] = (
+            self.minbatvenabled
+        )
         self.main()
 
     def _toggle_exthaltenabled(self, *args):
         global pijuiceConfigData
         self.exthaltenabled ^= True
-        pijuiceConfigData['system_task']['ext_halt_power_off']['enabled'] = self.exthaltenabled
+        pijuiceConfigData["system_task"]["ext_halt_power_off"]["enabled"] = (
+            self.exthaltenabled
+        )
         self.main()
 
     def validate_wdperiod(self, widget, newtext):
-        if newtext == '':
-            newtext = '0'
-        text = validate_value(newtext, 'int', 1, 65535,
-                              pijuiceConfigData['system_task']['watchdog']['period'])
-        pijuiceConfigData['system_task']['watchdog']['period'] = text
+        if newtext == "":
+            newtext = "0"
+        text = validate_value(
+            newtext,
+            "int",
+            1,
+            65535,
+            pijuiceConfigData["system_task"]["watchdog"]["period"],
+        )
+        pijuiceConfigData["system_task"]["watchdog"]["period"] = text
         if text != newtext:
             self.main()
 
     def validate_wkuplevel(self, widget, newtext):
         if newtext == "":
             newtext = "0"
-        text = validate_value(newtext, 'int', 1, 100,
-                              pijuiceConfigData['system_task']['wakeup_on_charge']['trigger_level'])
-        pijuiceConfigData['system_task']['wakeup_on_charge']['trigger_level'] = text
+        text = validate_value(
+            newtext,
+            "int",
+            1,
+            100,
+            pijuiceConfigData["system_task"]["wakeup_on_charge"]["trigger_level"],
+        )
+        pijuiceConfigData["system_task"]["wakeup_on_charge"]["trigger_level"] = text
         if text != newtext:
             self.main()
 
     def validate_minchglevel(self, widget, newtext):
         if newtext == "":
             newtext = "0"
-        text = validate_value(newtext, 'int', 0, 100,
-                              pijuiceConfigData['system_task']['min_charge']['threshold'])
-        pijuiceConfigData['system_task']['min_charge']['threshold'] = text
+        text = validate_value(
+            newtext,
+            "int",
+            0,
+            100,
+            pijuiceConfigData["system_task"]["min_charge"]["threshold"],
+        )
+        pijuiceConfigData["system_task"]["min_charge"]["threshold"] = text
         if text != newtext:
             self.main()
 
     def validate_minbatvlevel(self, widget, newtext):
         if newtext == "":
             newtext = "0.0"
-        text = validate_value(newtext, 'float', 0.01, 10.0,
-                              pijuiceConfigData['system_task']['min_bat_voltage']['threshold'])
-        pijuiceConfigData['system_task']['min_bat_voltage']['threshold'] = text
+        text = validate_value(
+            newtext,
+            "float",
+            0.01,
+            10.0,
+            pijuiceConfigData["system_task"]["min_bat_voltage"]["threshold"],
+        )
+        pijuiceConfigData["system_task"]["min_bat_voltage"]["threshold"] = text
         if float(text) != float(newtext):
             self.main()
 
     def validate_exthaltdelay(self, widget, newtext):
         if newtext == "":
             newtext = "0"
-        text = validate_value(newtext, 'int', 20, 65535,
-                              pijuiceConfigData['system_task']['ext_halt_power_off']['period'])
-        pijuiceConfigData['system_task']['ext_halt_power_off']['period'] = text
+        text = validate_value(
+            newtext,
+            "int",
+            20,
+            65535,
+            pijuiceConfigData["system_task"]["ext_halt_power_off"]["period"],
+        )
+        pijuiceConfigData["system_task"]["ext_halt_power_off"]["period"] = text
         if text != newtext:
             self.main()
 
 
 class SystemEventsTab(object):
-    EVENTS = ['low_charge', 'low_battery_voltage', 'no_power', 'power', 'watchdog_reset', 'button_power_off', 'forced_power_off',
-              'forced_sys_power_off', 'sys_start', 'sys_stop']
-    EVTTXT = ['Low charge', 'Low battery voltage', 'No power', 'Power present', 'Watchdog reset', 'Button power off', 'Forced power off',
-              'Forced sys power off', 'System start', 'System stop']
-    FUNCTIONS1 = ['NO_FUNC'] + pijuice_sys_functions + pijuice_user_functions
-    FUNCTIONS2 = ['NO_FUNC'] + pijuice_user_functions
+    EVENTS = [
+        "low_charge",
+        "low_battery_voltage",
+        "no_power",
+        "power",
+        "watchdog_reset",
+        "button_power_off",
+        "forced_power_off",
+        "forced_sys_power_off",
+        "sys_start",
+        "sys_stop",
+    ]
+    EVTTXT = [
+        "Low charge",
+        "Low battery voltage",
+        "No power",
+        "Power present",
+        "Watchdog reset",
+        "Button power off",
+        "Forced power off",
+        "Forced sys power off",
+        "System start",
+        "System stop",
+    ]
+    FUNCTIONS1 = ["NO_FUNC"] + pijuice_sys_functions + pijuice_user_functions
+    FUNCTIONS2 = ["NO_FUNC"] + pijuice_user_functions
 
     def __init__(self, *args):
         global pijuiceConfigData
         if pijuiceConfigData == None:
             pijuiceConfigData = loadPiJuiceConfig()
-        if not ('system_events' in pijuiceConfigData):
-            pijuiceConfigData['system_events'] = {}
+        if not ("system_events" in pijuiceConfigData):
+            pijuiceConfigData["system_events"] = {}
         for event in self.EVENTS:
-            if not(event in pijuiceConfigData['system_events']):
-                pijuiceConfigData['system_events'][event] = {}
-            if not('enabled' in pijuiceConfigData['system_events'][event]):
-                pijuiceConfigData['system_events'][event]['enabled'] = False
-            if not('function' in pijuiceConfigData['system_events'][event]):
-                pijuiceConfigData['system_events'][event]['function'] = 'NO_FUNC'
+            if not (event in pijuiceConfigData["system_events"]):
+                pijuiceConfigData["system_events"][event] = {}
+            if not ("enabled" in pijuiceConfigData["system_events"][event]):
+                pijuiceConfigData["system_events"][event]["enabled"] = False
+            if not ("function" in pijuiceConfigData["system_events"][event]):
+                pijuiceConfigData["system_events"][event]["function"] = "NO_FUNC"
         self.main()
 
     def main(self, *args):
         global pijuiceConfigData
-        elements = [urwid.Text('System Events'),
-                    urwid.Divider()
-        ]
+        elements = [urwid.Text("System Events"), urwid.Divider()]
 
         for i, event in enumerate(self.EVENTS):
-            eventchkbox = urwid.CheckBox(self.EVTTXT[i]+':', state=pijuiceConfigData['system_events'][event]['enabled'],
-                             on_state_change=self._toggle_eventenabled, user_data=event)
+            eventchkbox = urwid.CheckBox(
+                self.EVTTXT[i] + ":",
+                state=pijuiceConfigData["system_events"][event]["enabled"],
+                on_state_change=self._toggle_eventenabled,
+                user_data=event,
+            )
             eventitem = attrmap(eventchkbox)
-            func = pijuiceConfigData['system_events'][event]['function']
-            fbutton = attrmap(urwid.Button(func, on_press = self.set_function, user_data = [i, func]))
-            ftext   = attrmap(urwid.Text('  ' + func))
+            func = pijuiceConfigData["system_events"][event]["function"]
+            fbutton = attrmap(
+                urwid.Button(func, on_press=self.set_function, user_data=[i, func])
+            )
+            ftext = attrmap(urwid.Text("  " + func))
             funcitem = fbutton if eventchkbox.state else ftext
-            row = urwid.Columns([urwid.Padding(eventitem, width=25), urwid.Padding(funcitem, width = 25)])
+            row = urwid.Columns(
+                [urwid.Padding(eventitem, width=25), urwid.Padding(funcitem, width=25)]
+            )
             elements.append(row)
         elements.append(urwid.Divider())
 
         ## Footer ##
-        elements.extend([urwid.Padding(attrmap(urwid.Button('Refresh', on_press=self.refresh)), width=18),
-                         urwid.Padding(attrmap(urwid.Button('Apply settings', on_press=savePiJuiceConfig)), width=18),
-                         urwid.Padding(attrmap(urwid.Button('Back', on_press=main_menu)), width=18)
-                         ])
+        elements.extend(
+            [
+                urwid.Padding(
+                    attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)),
+                    width=18,
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=main_menu)), width=18
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def refresh(self, *args):
@@ -1921,55 +3044,76 @@ class SystemEventsTab(object):
         self.main()
 
     def _toggle_eventenabled(self, widget, state, event):
-        pijuiceConfigData['system_events'][event]['enabled'] = state
+        pijuiceConfigData["system_events"][event]["enabled"] = state
         self.main()
 
     def set_function(self, button, data):
         global pijuiceConfigData
         index = data[0]
         func = data[1]
-        elements = [urwid.Text("Select function for '"+self.EVTTXT[index]+"'"),
-                    urwid.Divider()]
+        elements = [
+            urwid.Text("Select function for '" + self.EVTTXT[index] + "'"),
+            urwid.Divider(),
+        ]
         self.functions = self.FUNCTIONS1 if index < 3 else self.FUNCTIONS2
         self.bgroup = []
         for function in self.functions:
             button = attrmap(urwid.RadioButton(self.bgroup, function))
             elements.append(button)
         self.bgroup[self.functions.index(func)].toggle_state()
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(attrmap(urwid.Button('Back', on_press=self._on_function_chosen, user_data=index)), width=8)
-                        ])
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(
+                        urwid.Button(
+                            "Back", on_press=self._on_function_chosen, user_data=index
+                        )
+                    ),
+                    width=8,
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def _on_function_chosen(self, button, index):
         states = [c.state for c in self.bgroup]
-        pijuiceConfigData['system_events'][self.EVENTS[index]]['function']=self.functions[states.index(True)]
-        self.bgroup=[]
+        pijuiceConfigData["system_events"][self.EVENTS[index]]["function"] = (
+            self.functions[states.index(True)]
+        )
+        self.bgroup = []
         self.main()
+
 
 class FileNavigator(object):
     """Filesystem picker shown over the current view; selecting a file calls
     on_pick(path). Navigates with the usual keys (CyclingListBox); Cancel/back
     aborts. ponytail: fills the bare path -- a USER_FUNC may be a full shell
     command, so any args are dropped; edit them in after picking."""
+
     def __init__(self, start, on_pick):
         self.on_pick = on_pick
         self.prev = main.original_widget
         self.prev_back = _current_back
         self.prev_loc = _location
         start_dir = start if os.path.isdir(start) else os.path.dirname(start)
-        self.cur = '/'
-        for cand in (start_dir, '/usr/local/bin', os.path.expanduser('~'), '/'):
+        self.cur = "/"
+        for cand in (start_dir, "/usr/local/bin", os.path.expanduser("~"), "/"):
             if cand and os.path.isdir(cand):
                 self.cur = cand
                 break
         self.show()
 
     def show(self):
-        elements = [urwid.Text("Select script  [" + self.cur + "]"), urwid.Divider(),
-                    attrmap(urwid.Button('../', on_press=self._go, user_data='..'))]
+        elements = [
+            urwid.Text("Select script  [" + self.cur + "]"),
+            urwid.Divider(),
+            attrmap(urwid.Button("../", on_press=self._go, user_data="..")),
+        ]
         try:
-            entries = sorted(os.scandir(self.cur), key=lambda e: (not e.is_dir(), e.name.lower()))
+            entries = sorted(
+                os.scandir(self.cur), key=lambda e: (not e.is_dir(), e.name.lower())
+            )
         except OSError:
             entries = []
         for e in entries:
@@ -1977,12 +3121,26 @@ class FileNavigator(object):
                 is_dir = e.is_dir()
             except OSError:
                 is_dir = False
-            elements.append(attrmap(urwid.Button(e.name + ('/' if is_dir else ''),
-                                                  on_press=self._go, user_data=e.name)))
-        elements.extend([urwid.Divider(),
-                         urwid.Padding(attrmap(urwid.Button('Cancel', on_press=self._cancel)), width=10)])
+            elements.append(
+                attrmap(
+                    urwid.Button(
+                        e.name + ("/" if is_dir else ""),
+                        on_press=self._go,
+                        user_data=e.name,
+                    )
+                )
+            )
+        elements.extend(
+            [
+                urwid.Divider(),
+                urwid.Padding(
+                    attrmap(urwid.Button("Cancel", on_press=self._cancel)), width=10
+                ),
+            ]
+        )
         main.original_widget = urwid.Padding(
-            CyclingListBox(urwid.SimpleFocusListWalker(elements)), left=1, right=1)
+            CyclingListBox(urwid.SimpleFocusListWalker(elements)), left=1, right=1
+        )
 
     def _go(self, button, name):
         path = os.path.normpath(os.path.join(self.cur, name))
@@ -1999,59 +3157,86 @@ class FileNavigator(object):
 
 class ScriptEdit(urwid.Edit):
     """Edit whose Enter opens the file picker (vim normal: l -> enter)."""
+
     _on_browse = None
+
     def set_on_browse(self, cb):
         self._on_browse = cb
+
     def keypress(self, size, key):
-        if key == 'enter' and self._on_browse:
+        if key == "enter" and self._on_browse:
             self._on_browse()
             return None
         return super().keypress(size, key)
 
 
-USER_FUNCS_TOTAL=15
+USER_FUNCS_TOTAL = 15
+
+
 class UserScriptsTab(object):
     def __init__(self, *args):
         global pijuiceConfigData
         if pijuiceConfigData == None:
             pijuiceConfigData = loadPiJuiceConfig()
-        if not ('user_functions' in pijuiceConfigData):
-            pijuiceConfigData['user_functions'] = {}
+        if not ("user_functions" in pijuiceConfigData):
+            pijuiceConfigData["user_functions"] = {}
         for i in range(USER_FUNCS_TOTAL):
-            fkey = 'USER_FUNC' + str(i+1)
-            if not (fkey in pijuiceConfigData['user_functions']):
-                pijuiceConfigData['user_functions'][fkey] = ''
+            fkey = "USER_FUNC" + str(i + 1)
+            if not (fkey in pijuiceConfigData["user_functions"]):
+                pijuiceConfigData["user_functions"][fkey] = ""
         self.main()
 
     def main(self, *args):
         global pijuiceConfigData
-        elements = [urwid.Text("User Scripts  (Enter on a slot to browse for a script)"),
-                    urwid.Divider()
+        elements = [
+            urwid.Text("User Scripts  (Enter on a slot to browse for a script)"),
+            urwid.Divider(),
         ]
 
         for i in range(USER_FUNCS_TOTAL):
-            flabel = 'USER FUNC' + str(i+1) + ': '
-            fkey = 'USER_FUNC' + str(i+1)
-            edititem = ScriptEdit(flabel, edit_text=pijuiceConfigData['user_functions'][fkey])
-            urwid.connect_signal(edititem, 'change', self.updatetext, user_args = [fkey,])
+            flabel = "USER FUNC" + str(i + 1) + ": "
+            fkey = "USER_FUNC" + str(i + 1)
+            edititem = ScriptEdit(
+                flabel, edit_text=pijuiceConfigData["user_functions"][fkey]
+            )
+            urwid.connect_signal(
+                edititem,
+                "change",
+                self.updatetext,
+                user_args=[
+                    fkey,
+                ],
+            )
             edititem.set_on_browse(lambda e=edititem, k=fkey: self._browse(k, e))
             elements.append(attrmap(edititem))
         elements.append(urwid.Divider())
 
         ## Footer ##
-        elements.extend([urwid.Padding(attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18),
-                         urwid.Padding(attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)), width=18),
-                         urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18)
-                         ])
+        elements.extend(
+            [
+                urwid.Padding(
+                    attrmap(urwid.Button("Refresh", on_press=self.refresh)), width=18
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Apply settings", on_press=savePiJuiceConfig)),
+                    width=18,
+                ),
+                urwid.Padding(
+                    attrmap(urwid.Button("Back", on_press=main_menu)), width=18
+                ),
+            ]
+        )
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
-    def updatetext(self,  key, widget, text):
+    def updatetext(self, key, widget, text):
         global pijuiceConfigData
-        pijuiceConfigData['user_functions'][key] = text
+        pijuiceConfigData["user_functions"][key] = text
 
     def _browse(self, fkey, edititem):
-        FileNavigator(pijuiceConfigData['user_functions'].get(fkey, ''),
-                      lambda path: edititem.set_edit_text(path))
+        FileNavigator(
+            pijuiceConfigData["user_functions"].get(fkey, ""),
+            lambda path: edititem.set_edit_text(path),
+        )
 
     def refresh(self, *args):
         global pijuiceConfigData
@@ -2068,23 +3253,29 @@ class SettingsTab(object):
 
     def main(self, *args):
         global pijuiceConfigData
-        cli = pijuiceConfigData.setdefault('cli_settings', {})
-        elements = [urwid.Text("Settings"), urwid.Divider(),
-                    attrmap(urwid.CheckBox("Enable vim keybindings",
-                                           state=cli.get('vim_keys', False),
-                                           on_state_change=self._toggle_vim)),
-                    urwid.Divider(),
-                    urwid.Text(('line', "Changes apply immediately.")),
-                    urwid.Divider(),
-                    urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18),
-                    ]
+        cli = pijuiceConfigData.setdefault("cli_settings", {})
+        elements = [
+            urwid.Text("Settings"),
+            urwid.Divider(),
+            attrmap(
+                urwid.CheckBox(
+                    "Enable vim keybindings",
+                    state=cli.get("vim_keys", False),
+                    on_state_change=self._toggle_vim,
+                )
+            ),
+            urwid.Divider(),
+            urwid.Text(("line", "Changes apply immediately.")),
+            urwid.Divider(),
+            urwid.Padding(attrmap(urwid.Button("Back", on_press=main_menu)), width=18),
+        ]
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def _toggle_vim(self, checkbox, state):
         # Immediate-apply: toggling already activates it live, and it's CLI-only
         # JSON the service never reads, so persist now — no Apply, no dirty-warning.
         global VIM_ENABLED, pijuiceConfigData
-        pijuiceConfigData.setdefault('cli_settings', {})['vim_keys'] = state
+        pijuiceConfigData.setdefault("cli_settings", {})["vim_keys"] = state
         VIM_ENABLED = state
         save_cli_config_quiet()
         _update_title()
@@ -2101,17 +3292,17 @@ class CyclingListBox(urwid.ListBox):
     def keypress(self, size, key):
         # gg/G (mapped to home/end) land on the first/last *selectable* row so
         # the highlight never lands on the non-selectable title.
-        if key == 'home':
+        if key == "home":
             self._focus_edge(from_top=True)
             return None
-        if key == 'end':
+        if key == "end":
             self._focus_edge(from_top=False)
             return None
         result = super().keypress(size, key)
-        if result == 'down':
+        if result == "down":
             self._focus_edge(from_top=True)
             return None
-        if result == 'up':
+        if result == "up":
             self._focus_edge(from_top=False)
             return None
         return result
@@ -2127,11 +3318,11 @@ class CyclingListBox(urwid.ListBox):
 
 def menu(title, choices):
     _InitPiJuiceInterface()
-    body = [urwid.Divider()]   # location shown in the header now
+    body = [urwid.Divider()]  # location shown in the header now
     for c in choices:
         if c != "":
             button = urwid.Button(c)
-            urwid.connect_signal(button, 'click', item_chosen, c)
+            urwid.connect_signal(button, "click", item_chosen, c)
             wrapped_button = urwid.Padding(attrmap(button), width=20)
             body.append(wrapped_button)
         else:
@@ -2148,19 +3339,13 @@ def item_chosen(button, choice):
     callback()
 
 
-def not_implemented_yet(*args):
-    main_menu_btn = urwid.Button('Back', on_press=main_menu)
-    main.original_widget = urwid.Filler(
-        urwid.Pile([urwid.Text("Not implemented yet"), urwid.Divider(), main_menu_btn]))
-
-
 def main_menu(*args):
     global _location
-    _location = 'PiJuice HAT Configuration'
+    _location = "PiJuice HAT Configuration"
     m = menu("PiJuice HAT Configuration", choices)
-    if _last_choice is not None:                 # land on the item we came from
+    if _last_choice is not None:  # land on the item we came from
         for i, w in enumerate(m.body):
-            b = getattr(w, 'base_widget', w)
+            b = getattr(w, "base_widget", w)
             if isinstance(b, urwid.Button) and b.label == _last_choice:
                 m.set_focus(i)
                 break
@@ -2170,35 +3355,38 @@ def main_menu(*args):
 def exit_program(button=None):
     raise urwid.ExitMainLoop()
 
+
 def attrmap(w):
     if isinstance(w, urwid.Edit):
         # Editing a text field marks the view dirty (warn before discarding on back).
-        urwid.connect_signal(w, 'change', _mark_dirty)
-    return urwid.AttrMap(w, 'button', focus_map='button_focus')
+        urwid.connect_signal(w, "change", _mark_dirty)
+    return urwid.AttrMap(w, "button", focus_map="button_focus")
+
 
 def loadPiJuiceConfig():
-    try:
-        with open(PiJuiceConfigDataPath, 'r') as outputConfig:
-            pijuiceConfigData = json.load(outputConfig)
-    except:
-        pijuiceConfigData = {}
-    return pijuiceConfigData
+    return _service_load_config(PiJuiceConfigDataPath)
+
 
 def savePiJuiceConfig(*args):
     global _dirty
     try:
-        with open(PiJuiceConfigDataPath, 'w+') as outputConfig:
-            json.dump(pijuiceConfigData, outputConfig, indent=2)
+        _service_save_config(pijuiceConfigData, PiJuiceConfigDataPath)
         _dirty = False
-        ret = notify_service(*args)
+        ret = notify_service()
         text = "Settings saved"
         if ret != 0:
-            text += ("\n\nFailed to communicate with PiJuice service.\n"
-                    "See system logs and 'systemctl status pijuice.service' for details.")
+            text += (
+                "\n\nFailed to communicate with PiJuice service.\n"
+                "See system logs and 'systemctl status pijuice.service' for details."
+            )
         confirmation_dialog(text, next=main_menu)
     except:
-        confirmation_dialog("Failed to save settings to " + PiJuiceConfigDataPath + "\n"
-                            "Check permissions of " + PiJuiceConfigDataPath, next=main_menu)
+        confirmation_dialog(
+            "Failed to save settings to " + PiJuiceConfigDataPath + "\n"
+            "Check permissions of " + PiJuiceConfigDataPath,
+            next=main_menu,
+        )
+
 
 def save_cli_config_quiet():
     # Persist config without notifying the daemon or popping a dialog. For
@@ -2206,21 +3394,17 @@ def save_cli_config_quiet():
     # the service never reads, so neither an Apply step nor a SIGHUP is needed.
     global _dirty
     try:
-        with open(PiJuiceConfigDataPath, 'w+') as outputConfig:
-            json.dump(pijuiceConfigData, outputConfig, indent=2)
+        _service_save_config(pijuiceConfigData, PiJuiceConfigDataPath)
         _dirty = False
         return True
     except Exception:
         return False
 
+
 def notify_service(*args):
-    ret = -1
-    try:
-        pid = int(open(PID_FILE, 'r').read())
-        ret = os.system("sudo kill -SIGHUP " + str(pid) + " > /dev/null 2>&1")
-    except:
-        pass
-    return ret
+    # Delegate to the shared, shell-free SIGHUP notifier (no os.system).
+    return _service_notify_service(PID_FILE)
+
 
 menu_mapping = {
     "Status": StatusTab,
@@ -2235,12 +3419,27 @@ menu_mapping = {
     "System Events": SystemEventsTab,
     "User Scripts": UserScriptsTab,
     "Settings": SettingsTab,
-    "Exit": exit_program
+    "Exit": exit_program,
 }
 
 # Use list of entries to set order
-choices = ["Status", "General", "Buttons", "LEDs", "Battery profile", "IO", "Wakeup Alarm",
-           "Firmware", "", "System Task", "System Events", "User Scripts", "", "Settings", "Exit"]
+choices = [
+    "Status",
+    "General",
+    "Buttons",
+    "LEDs",
+    "Battery profile",
+    "IO",
+    "Wakeup Alarm",
+    "Firmware",
+    "",
+    "System Task",
+    "System Events",
+    "User Scripts",
+    "",
+    "Settings",
+    "Exit",
+]
 
 # ── navigation state ─────────────────────────────────────────────────────────
 # Each view still builds a "Back"/"Cancel" button as before, but _ContentArea
@@ -2249,21 +3448,30 @@ choices = ["Status", "General", "Buttons", "LEDs", "Battery profile", "IO", "Wak
 # 'left'/'h' that goes unhandled (focus at the left edge) all call it. The action
 # may navigate OR commit a chooser selection (behaviour unchanged). New views get
 # this for free just by keeping a Back/Cancel button.
-_dirty = False            # unapplied text edits in the current view
-_current_back = None      # the hoisted Back/Cancel button of the current view
-_location = ''            # breadcrumb shown in the header
-_last_choice = None       # last main-menu item entered (restore focus on back)
-_suppress_hoist = False   # re-render a view without re-hoisting (dirty cancel)
-_in_dialog = False        # a confirmation_dialog is showing
-_dialog_cancel = None     # Esc action while a dialog is up
-frame = None              # set once the UI is built
+_dirty = False  # unapplied text edits in the current view
+_current_back = None  # the hoisted Back/Cancel button of the current view
+_location = ""  # breadcrumb shown in the header
+_last_choice = None  # last main-menu item entered (restore focus on back)
+_suppress_hoist = False  # re-render a view without re-hoisting (dirty cancel)
+_in_dialog = False  # a confirmation_dialog is showing
+_dialog_cancel = None  # Esc action while a dialog is up
+frame = None  # set once the UI is built
 linebox = None
+main = None
+loop = None
 
-VIM_ENABLED = bool(loadPiJuiceConfig().get('cli_settings', {}).get('vim_keys', False))
-_vim_mode = 'normal'      # 'normal' | 'insert' (only meaningful when VIM_ENABLED)
+VIM_ENABLED = bool(loadPiJuiceConfig().get("cli_settings", {}).get("vim_keys", False))
+_vim_mode = "normal"  # 'normal' | 'insert' (only meaningful when VIM_ENABLED)
 _vim_pending_g = False
-_VIM_MOTIONS = {'j': 'down', 'k': 'up', 'h': 'left', 'l': 'right', 'G': 'end',
-                'ctrl f': 'page down', 'ctrl b': 'page up'}
+_VIM_MOTIONS = {
+    "j": "down",
+    "k": "up",
+    "h": "left",
+    "l": "right",
+    "G": "end",
+    "ctrl f": "page down",
+    "ctrl b": "page up",
+}
 
 
 def _mark_dirty(*args):
@@ -2281,7 +3489,7 @@ def _focus_is_editable(widget):
             break
         seen.add(id(widget))
         child = None
-        for attr in ('focus', 'original_widget'):
+        for attr in ("focus", "original_widget"):
             candidate = getattr(widget, attr, None)
             if candidate is not None and candidate is not widget:
                 child = candidate
@@ -2298,10 +3506,10 @@ def _rows_container(widget):
     while widget is not None and id(widget) not in seen:
         seen.add(id(widget))
         if isinstance(widget, urwid.Pile):
-            return 'pile', widget.contents
+            return "pile", widget.contents
         if isinstance(widget, urwid.ListBox):
-            return 'walker', widget.body
-        widget = getattr(widget, 'original_widget', None)
+            return "walker", widget.body
+        widget = getattr(widget, "original_widget", None)
     return None, None
 
 
@@ -2312,9 +3520,9 @@ def _hoist_back(widget):
     if rows is None:
         return None
     for i, entry in enumerate(rows):
-        row = entry[0] if kind == 'pile' else entry
-        leaf = getattr(row, 'base_widget', row)
-        if isinstance(leaf, urwid.Button) and leaf.label in ('Back', 'Cancel'):
+        row = entry[0] if kind == "pile" else entry
+        leaf = getattr(row, "base_widget", row)
+        if isinstance(leaf, urwid.Button) and leaf.label in ("Back", "Cancel"):
             del rows[i]
             return leaf
     return None
@@ -2322,13 +3530,16 @@ def _hoist_back(widget):
 
 class _ContentArea(urwid.Padding):
     """Padding whose content swap hoists the view's Back button into the header."""
+
     def _set_original_widget(self, widget):
         back = None if _suppress_hoist else _hoist_back(widget)
         urwid.WidgetDecoration._set_original_widget(self, widget)
         if not _suppress_hoist:
             _on_view_changed(back)
-    original_widget = property(urwid.WidgetDecoration._get_original_widget,
-                               _set_original_widget)
+
+    original_widget = property(
+        urwid.WidgetDecoration._get_original_widget, _set_original_widget
+    )
 
 
 def _on_view_changed(back):
@@ -2339,8 +3550,9 @@ def _on_view_changed(back):
 
 class _BareButton(urwid.Button):
     """Button without the global [ ] chrome -- used for the header back control."""
-    button_left = urwid.Text('')
-    button_right = urwid.Text('')
+
+    button_left = urwid.Text("")
+    button_right = urwid.Text("")
 
 
 def _render_header():
@@ -2348,19 +3560,19 @@ def _render_header():
         return
     cols = []
     if _current_back is not None:
-        back_btn = _BareButton('← back', on_press=go_back)   # arrow cues left/h
-        cols.append((10, urwid.AttrMap(back_btn, 'button', focus_map='button_focus')))
-    cols.append(urwid.AttrMap(urwid.Text(_location), 'title'))
+        back_btn = _BareButton("← back", on_press=go_back)  # arrow cues left/h
+        cols.append((10, urwid.AttrMap(back_btn, "nav", focus_map="button_focus")))
+    cols.append(urwid.AttrMap(urwid.Text(_location), "title"))
     frame.header = urwid.Columns(cols, dividechars=1)
 
 
 def _update_title():
     if linebox is None:
         return
-    if VIM_ENABLED and _vim_mode == 'insert':
-        linebox.set_title('PiJuice CLI  -- INSERT --')
+    if VIM_ENABLED and _vim_mode == "insert":
+        linebox.set_title("PiJuice CLI  -- INSERT --")
     else:
-        linebox.set_title('PiJuice CLI')
+        linebox.set_title("PiJuice CLI")
 
 
 def go_back(*args):
@@ -2374,7 +3586,8 @@ def go_back(*args):
             "Unsaved changes will be lost. Go back?",
             next=lambda *a: _do_back(prev_back),
             nextno=lambda *a: _restore_view(prev_w, prev_back, prev_loc),
-            single_option=False)
+            single_option=False,
+        )
         return
     _do_back(_current_back)
 
@@ -2383,7 +3596,7 @@ def _do_back(btn):
     global _dirty
     _dirty = False
     if btn is not None:
-        urwid.emit_signal(btn, 'click', btn)
+        urwid.emit_signal(btn, "click", btn)
 
 
 def _back_or_exit(*args):
@@ -2414,22 +3627,24 @@ def vim_translate(keys, mode, editable, pending_g):
     triggered separately when 'left' goes unhandled (focus at the left edge)."""
     out, want_insert = [], False
     for key in keys:
-        if mode == 'insert':
-            if key == 'esc':
-                mode = 'normal'
+        if mode == "insert":
+            if key == "esc":
+                mode = "normal"
             else:
                 out.append(key)
             continue
         # normal mode
-        if key == 'g':
+        if key == "g":
             if pending_g:
-                out.append('home'); pending_g = False
+                out.append("home")
+                pending_g = False
             else:
                 pending_g = True
             continue
         pending_g = False
-        if key in ('i', 'a') and editable:
-            want_insert = True; mode = 'insert'
+        if key in ("i", "a") and editable:
+            want_insert = True
+            mode = "insert"
         elif key in _VIM_MOTIONS:
             out.append(_VIM_MOTIONS[key])
         elif editable and len(key) == 1 and key.isprintable():
@@ -2446,12 +3661,16 @@ def input_filter(keys, raw):
     for key in keys:
         # Esc only special in vim insert mode (-> normal); otherwise it falls
         # through to unhandled_input, which does cancel/back/quit.
-        if key == 'esc' and VIM_ENABLED and _vim_mode == 'insert':
-            _vim_mode = 'normal'; _update_title(); continue
+        if key == "esc" and VIM_ENABLED and _vim_mode == "insert":
+            _vim_mode = "normal"
+            _update_title()
+            continue
         if not VIM_ENABLED:
-            out.append(key); continue
+            out.append(key)
+            continue
         mapped, _vim_mode, _vim_pending_g, want_insert = vim_translate(
-            [key], _vim_mode, editable, _vim_pending_g)
+            [key], _vim_mode, editable, _vim_pending_g
+        )
         if want_insert:
             _update_title()
         out.extend(mapped)
@@ -2461,83 +3680,116 @@ def input_filter(keys, raw):
 def unhandled_input(key):
     # Reached only when no widget consumed the key. 'left' here means focus is at
     # the left edge (vertical list, or leftmost column) -> go back. Esc -> back/quit.
-    if key == 'left':
+    if key == "left":
         go_back()
-    elif key == 'esc':
+    elif key == "esc":
         _back_or_exit()
 
 
 def _selftest():
-    assert vim_translate(['j'], 'normal', False, False)[0] == ['down']
-    assert vim_translate(['k'], 'normal', False, False)[0] == ['up']
-    assert vim_translate(['h'], 'normal', False, False)[0] == ['left']   # move/back-at-edge
-    assert vim_translate(['l'], 'normal', False, False)[0] == ['right']  # move right (columns)
-    out, m, p, ins = vim_translate(['g'], 'normal', False, False)
+    assert vim_translate(["j"], "normal", False, False)[0] == ["down"]
+    assert vim_translate(["k"], "normal", False, False)[0] == ["up"]
+    assert vim_translate(["h"], "normal", False, False)[0] == [
+        "left"
+    ]  # move/back-at-edge
+    assert vim_translate(["l"], "normal", False, False)[0] == [
+        "right"
+    ]  # move right (columns)
+    out, m, p, ins = vim_translate(["g"], "normal", False, False)
     assert p is True and out == []
-    assert vim_translate(['g'], 'normal', False, True)[0] == ['home']
-    out, m, p, ins = vim_translate(['i'], 'normal', True, False)
-    assert ins is True and m == 'insert' and out == []
-    assert vim_translate(['x'], 'normal', True, False)[0] == []        # swallowed
-    assert vim_translate(['x'], 'insert', True, False)[0] == ['x']     # typed
-    out, m, p, ins = vim_translate(['esc'], 'insert', True, False)
-    assert m == 'normal' and out == []
-    assert vim_translate(['enter'], 'normal', False, False)[0] == ['enter']  # select
+    assert vim_translate(["g"], "normal", False, True)[0] == ["home"]
+    out, m, p, ins = vim_translate(["i"], "normal", True, False)
+    assert ins is True and m == "insert" and out == []
+    assert vim_translate(["x"], "normal", True, False)[0] == []  # swallowed
+    assert vim_translate(["x"], "insert", True, False)[0] == ["x"]  # typed
+    out, m, p, ins = vim_translate(["esc"], "insert", True, False)
+    assert m == "normal" and out == []
+    assert vim_translate(["enter"], "normal", False, False)[0] == ["enter"]  # select
     # _hoist_back removes the Back/Cancel row and returns its button.
-    bb = urwid.Button('Back')
-    pile = urwid.Pile([urwid.Text('t'), urwid.Divider(), urwid.Padding(attrmap(bb), width=8)])
+    bb = urwid.Button("Back")
+    pile = urwid.Pile(
+        [urwid.Text("t"), urwid.Divider(), urwid.Padding(attrmap(bb), width=8)]
+    )
     assert _hoist_back(urwid.Filler(pile)) is bb and len(pile.contents) == 2
-    lb = CyclingListBox(urwid.SimpleFocusListWalker([urwid.Text('t'), attrmap(urwid.Button('Cancel'))]))
+    lb = CyclingListBox(
+        urwid.SimpleFocusListWalker([urwid.Text("t"), attrmap(urwid.Button("Cancel"))])
+    )
     assert isinstance(_hoist_back(lb), urwid.Button) and len(lb.body) == 1
-    assert _hoist_back(urwid.Filler(urwid.Pile([urwid.Text('x')]))) is None
-    print('selftest OK')
+    assert _hoist_back(urwid.Filler(urwid.Pile([urwid.Text("x")]))) is None
+    print("selftest OK")
 
 
-if '--selftest' in sys.argv:
-    _selftest()
-    sys.exit(0)
+# Palette: cohesive cyan accent, high-contrast focus -- the single place that
+# styles the whole CLI. Backgrounds are "" so they inherit the terminal's own
+# light/dark scheme.
+PALETTE = [
+    ("reversed", "standout", ""),
+    ("title", "light cyan,bold", ""),
+    ("nav", "light cyan", ""),
+    ("button", "default", ""),
+    ("button_focus", "black", "light cyan"),
+    ("error", "light red,bold", ""),
+    ("ok", "light green,bold", ""),
+    ("line", "dark cyan", ""),
+]
 
-# ── build UI ─────────────────────────────────────────────────────────────────
-nolock = False
-lock_file = open(LOCK_FILE, 'w')
-try:
-    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except IOError:
-    nolock = True
 
 def exit_cli(*args):
     raise urwid.ExitMainLoop()
 
-if nolock:
-    elements = [urwid.Padding(urwid.Text('Another instance of PiJuice Settings is already running',
-                                         align='center')),
-                urwid.Divider()]
-    elements.append(urwid.Padding(attrmap(urwid.Button("OK", on_press=exit_cli)), width=6, align='center'))
-    main = _ContentArea(urwid.Filler(urwid.Pile(elements)), left=2, right=2)
-else:
-    pijuiceConfigData = None
-    main = _ContentArea(menu("PiJuice HAT Configuration", choices), left=2, right=2)
-    _location = 'PiJuice HAT Configuration'
 
-# Palette: cohesive cyan accent, high-contrast focus. First pass -- tweak the
-# accent/colours here; this is the single place that styles the whole CLI.
-PALETTE = [
-    ('reversed',     'standout',            ''),
-    ('title',        'light cyan,bold',     ''),
-    ('button',       'default',             ''),
-    ('button_focus', 'black',               'light cyan'),
-    ('error',        'light red,bold',      ''),
-    ('ok',           'light green,bold',    ''),
-    ('line',         'dark cyan',           ''),
-]
+def _build_and_run():
+    global main, frame, linebox, loop, pijuiceConfigData, _location
+    nolock = False
+    lock_file = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        nolock = True
 
-frame = urwid.Frame(body=main)
-linebox = urwid.LineBox(frame, title='PiJuice CLI')
-top = urwid.Overlay(linebox, urwid.SolidFill(u'\N{LIGHT SHADE}'),
-                    align='center', width=64,
-                    valign='middle', height=20)
-_render_header()
+    if nolock:
+        elements = [
+            urwid.Padding(
+                urwid.Text(
+                    "Another instance of PiJuice Settings is already running",
+                    align="center",
+                )
+            ),
+            urwid.Divider(),
+        ]
+        elements.append(
+            urwid.Padding(
+                attrmap(urwid.Button("OK", on_press=exit_cli)), width=6, align="center"
+            )
+        )
+        main = _ContentArea(urwid.Filler(urwid.Pile(elements)), left=2, right=2)
+    else:
+        pijuiceConfigData = None
+        main = _ContentArea(menu("PiJuice HAT Configuration", choices), left=2, right=2)
+        _location = "PiJuice HAT Configuration"
 
-loop = urwid.MainLoop(top, palette=PALETTE, input_filter=input_filter,
-                      unhandled_input=unhandled_input)
-loop.run()
+    frame = urwid.Frame(body=main)
+    linebox = urwid.LineBox(frame, title="PiJuice CLI")
+    top = urwid.Overlay(
+        linebox,
+        urwid.SolidFill("\N{LIGHT SHADE}"),
+        align="center",
+        width=64,
+        valign="middle",
+        height=20,
+    )
+    _render_header()
 
+    loop = urwid.MainLoop(
+        top, palette=PALETTE, input_filter=input_filter, unhandled_input=unhandled_input
+    )
+    loop.run()
+
+
+# Importing the module must not launch the TUI or grab the lock -- only running
+# it as a script does.
+if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
+    _build_and_run()
