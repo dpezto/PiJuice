@@ -2,6 +2,8 @@
 __version__ = "1.8"
 
 import ctypes
+import functools
+import operator
 import sys
 import threading
 import time
@@ -44,10 +46,7 @@ class PiJuiceInterface(object):
         return self.addr
 
     def _GetChecksum(self, data):
-        fcs = 0xFF
-        for x in data[:]:
-            fcs = fcs ^ x
-        return fcs
+        return functools.reduce(operator.xor, data, 0xFF)
 
     def _Read(self):
         try:
@@ -75,10 +74,7 @@ class PiJuiceInterface(object):
         self.t.start()
 
         # wait for transfer to finish or timeout
-        n = 0
-        while self.t.is_alive() and n < 2:
-            time.sleep(0.05)
-            n = n + 1
+        self.t.join(0.1)
         if self.comError or self.t.is_alive():
             return False
 
@@ -716,14 +712,7 @@ class PiJuiceRtcAlarm(object):
                 if d[8] == 0xFF:
                     alarm['weekday'] = 'EVERY_DAY'
                 else:
-                    day = ''
-                    n = 0
-                    for j in range(1, 8):
-                        if d[8] & ((0x01 << j) & 0xFF):
-                            day = (day + ';') if n > 0 else day
-                            day = day + str(j)
-                            n = n + 1
-                    alarm['weekday'] = day
+                    alarm['weekday'] = ';'.join(str(j) for j in range(1, 8) if d[8] & (1 << j))
         else:
             if (d[3] & 0x80) == 0x00:
                 alarm['day'] = ((d[3] >> 4) & 0x03) * 10 + (d[3] & 0x0F)
@@ -804,9 +793,7 @@ class PiJuiceRtcAlarm(object):
                 elif (isinstance(h, str) and h.find(';') >= 0):
                     hs = 0x00000000
                     # hFormat = ''
-                    hl = h.split(';')
-                    # remove ending empty string if there is ; at the end of list
-                    hl = hl[0:-1] if (not bool(hl[-1].strip())) else hl
+                    hl = [x for x in h.split(';') if x.strip()]
                     for i in hl:
                         if (i.find('AM') > -1) or (i.find('PM') > -1):
                             if i.find('AM') > -1:
