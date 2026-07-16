@@ -46,8 +46,9 @@ pijuice-base; urgency=low
       (`/etc/modules-load.d`). Adds `dkms` + `raspberrypi-kernel-headers` deps
     - src/pijuice_sys.py: the service pushes charge/status/voltage/current/temp
       into the module each 5s poll (`_UpdatePowerSupply`)
-    - data/99-pijuice-power.rules: udev rule granting the pijuice service group
-      write access to the module's otherwise root-only sysfs attrs
+    - pijuice.service: a root `ExecStartPre` hands the pijuice group write
+      access to the module's otherwise root-only sysfs attrs, so the
+      unprivileged daemon can write them
 
 ## Version 1.2
 Added packages to both Raspbian Jessie and Stretch

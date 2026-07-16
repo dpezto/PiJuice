@@ -75,18 +75,17 @@ the module is built and loaded on install and rebuilt automatically on kernel
 updates. To set it up on a manual install:
 
 ```bash
+sudo apt-get install -y dkms
 sudo cp -r Software/kernel/pijuice_power /usr/src/pijuice-power-1.0
 sudo dkms add -m pijuice-power -v 1.0
 sudo dkms install -m pijuice-power -v 1.0
 echo pijuice_power | sudo tee /etc/modules-load.d/pijuice_power.conf
-sudo cp Software/Source/data/99-pijuice-power.rules /etc/udev/rules.d/
-sudo udevadm control --reload
 sudo modprobe pijuice_power
 ```
 
-The udev rule grants the `pijuice` service group write access to the module's
-sysfs attributes (they are otherwise `root`-only); without it the daemon cannot
-update the reading.
+The module's sysfs attributes are `root`-only; the `pijuice.service` unit fixes
+their group ownership on start (via a root `ExecStartPre`) so the unprivileged
+daemon can update the reading.
 
 ## GUI Menus
 

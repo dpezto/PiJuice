@@ -7,6 +7,10 @@ After=dev-i2c\x2d1.device
 Type=idle
 User=pijuice
 WorkingDirectory=/var/lib/pijuice/
+# The pijuice_power module's sysfs attrs are root:root 0644; hand the pijuice
+# group write access so the (unprivileged) daemon can push readings. '+' runs
+# as root despite User=pijuice, '-' ignores failure when the module is absent.
+ExecStartPre=+-/bin/sh -c 'd=/sys/class/power_supply/pijuice; [ -d "$d" ] || exit 0; for a in status present capacity voltage_now current_now temp; do chgrp pijuice "$d/$a"; chmod g+w "$d/$a"; done'
 ExecStart=/usr/bin/pijuice_sys.py
 ExecStopPost=/usr/bin/pijuice_sys.py stop
 Restart=always
