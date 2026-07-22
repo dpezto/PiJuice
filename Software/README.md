@@ -26,11 +26,11 @@ Install the dependency python urwid package:
 
 For the light version:
 
-`sudo dpkg -i ./pijuice-base_1.8_all.deb`
+`sudo dpkg -i ./pijuice-base_*_all.deb`
 
 For example for the full version with GUI:
 
-`sudo dpkg -i ./pijuice-gui_1.8_all.deb`
+`sudo dpkg -i ./pijuice-gui_*_all.deb`
 
 **Note:** You must install the PiJuice base version prior to installing the GUI.
 
@@ -45,7 +45,7 @@ To remove PiJuice you'll need to run:
 #### Build DEB-packages manually
 `./pckg-pijuice.sh`
 
-*Note: You will need python-stdeb, dh-systemd and debhelper in order to be able to build.*
+*Note: You will need stdeb3 and debhelper in order to be able to build.*
 
 #### OSMC/Kodi Installations
 
@@ -459,7 +459,7 @@ To launch the PiJuice CLI simply open up the Terminal or from the command line t
 
 ![pijuice cli](https://user-images.githubusercontent.com/1878314/64280401-f23a1b00-cf48-11e9-9a3f-21e7211a72e1.png)
 
-The PiJuice command line interface is an extension of the PiJuice HAT Configuration GUI with the exception that System Task, System Events and User Scripts cannot be configurable from the command line interface. To configure these options you will need to directly modify the JSON file as shown in the next section.
+The PiJuice command line interface is an extension of the PiJuice HAT Configuration GUI and exposes the same configuration options, including System Task, System Events and User Scripts.
 
 To scroll the menu simply use your arrow keys on your keyboard and press enter to select options or navigate through the menu system.
 

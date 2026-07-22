@@ -100,4 +100,4 @@ sudo systemctl restart pijuice.service
   and the slot is non-empty; `journalctl -u pijuice.service -f` while you press.
 - "Permission denied" → the command needs a sudo wrapper (runs as `pijuice`).
 - Edited the JSON by hand → never `chmod 700` `/var/lib/pijuice`; the service
-  crashes. Restore `755` + `pijuice:pijuice` ownership.
+  crashes. Restore `770` (dir) / `660` (JSON) + `pijuice:pijuice` ownership.
