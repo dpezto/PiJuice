@@ -288,19 +288,42 @@ def reload_settings(signum=None, frame=None):
     global watchdogEn
     if watchdogEn: _ConfigureWatchdog('ACTIVATE') # Update watchdog setting
 
+_psWriteErrors = set()   # (attr, errno) already reported, so the journal isn't spammed
+_psMissingReported = False
+_batCapacityMah = None   # battery profile capacity, read once from the HAT
+
+
 def _write_power_supply(attr, val):
     try:
         with open(os.path.join(POWER_SUPPLY_DIR, attr), 'w') as f:
             f.write(str(val))
-    except OSError:
-        pass  # module not loaded / attr not writable: nothing to report to
+        _psWriteErrors.difference_update({k for k in _psWriteErrors if k[0] == attr})
+    except OSError as e:
+        if (attr, e.errno) not in _psWriteErrors:
+            _psWriteErrors.add((attr, e.errno))
+            print('pijuice_power: cannot write %s: %s' % (attr, e), file=sys.stderr, flush=True)
 
 
 def _UpdatePowerSupply(status):
     # ponytail: called from the 5s poll block, not the 1s path, so the extra
     # voltage/current/temp I2C reads stay cheap. Tighten if a UI lags.
+    global _psMissingReported, _batCapacityMah
     if not os.path.isdir(POWER_SUPPLY_DIR):
+        if not _psMissingReported:
+            _psMissingReported = True
+            print('pijuice_power: %s missing, is the pijuice_power module loaded?' % POWER_SUPPLY_DIR,
+                  file=sys.stderr, flush=True)
         return
+    if _psMissingReported:
+        _psMissingReported = False
+        print('pijuice_power: %s present again' % POWER_SUPPLY_DIR, flush=True)
+    if _batCapacityMah is None:
+        prof = pijuice.config.GetBatteryProfile()
+        if prof.get('error') == 'NO_ERROR' and isinstance(prof['data'].get('capacity'), int):
+            _batCapacityMah = prof['data']['capacity']
+    if _batCapacityMah:
+        # Written every poll (no I2C) so a module reload picks it up again.
+        _write_power_supply('charge_full', _batCapacityMah * 1000)   # mAh -> uAh
     bat = status.get('battery')
     charge = pijuice.status.GetChargeLevel().get('data')
     if bat == 'NOT_PRESENT':

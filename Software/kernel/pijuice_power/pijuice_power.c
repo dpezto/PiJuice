@@ -22,6 +22,7 @@ static int present = 1;
 static int voltage_now;		/* microvolts */
 static int current_now;		/* microamps */
 static int temp;		/* tenths of a degree Celsius */
+static int charge_full;		/* microamp-hours, from the HAT battery profile */
 
 static enum power_supply_property pijuice_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
@@ -31,6 +32,10 @@ static enum power_supply_property pijuice_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_TEMP,
+	/* Readers that ignore CAPACITY (e.g. wf-panel-pi batt) need charge_*. */
+	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_FULL,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
 };
 
 static int pijuice_get_property(struct power_supply *psy,
@@ -58,6 +63,14 @@ static int pijuice_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
 		val->intval = temp;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+		val->intval = charge_full;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+		/* Derived, so it can never disagree with capacity. */
+		val->intval = capacity * (charge_full / 100);
 		break;
 	default:
 		return -EINVAL;
@@ -88,6 +101,9 @@ static int pijuice_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_TEMP:
 		temp = val->intval;
 		break;
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+		charge_full = val->intval;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -105,6 +121,7 @@ static int pijuice_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 	case POWER_SUPPLY_PROP_TEMP:
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		return 1;
 	default:
 		return 0;
@@ -154,3 +171,4 @@ module_exit(pijuice_power_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PiJuice virtual power_supply, fed by the pijuice_sys daemon");
 MODULE_AUTHOR("PiJuice");
+MODULE_VERSION("1.1");
