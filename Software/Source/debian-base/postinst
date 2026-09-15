@@ -33,9 +33,6 @@ else
 	exit 1
 fi
 
-# Create symbolic link in /usr/lib/python3/dist-packages so the pijuice module is found by python 3.x (x > 5)
-ln -sf /usr/lib/python3.9/dist-packages/pijuice.py /usr/lib/python3/dist-packages  # Build on Bullseye, Debian 11
-
 echo "Setting ownership and permissions"
 chown -R pijuice:pijuice /var/lib/pijuice
 # Group-accessible so the desktop user (in group pijuice) can traverse the dir
@@ -110,19 +107,26 @@ fi
 # Build and load the pijuice_power virtual battery module via DKMS, so btop /
 # upower / desktops can read the HAT battery from /sys/class/power_supply.
 # The pijuice_sys daemon pushes live values into it each poll.
+# Fails the package install on any DKMS error: a silently missing module is worse.
 PJ_MOD=pijuice-power
-PJ_MOD_VER=1.0
-if command -v dkms > /dev/null 2>&1 && [ -d "/usr/src/${PJ_MOD}-${PJ_MOD_VER}" ]; then
-	if ! dkms status -m "$PJ_MOD" -v "$PJ_MOD_VER" 2>/dev/null | grep -q "$PJ_MOD"; then
-		dkms add -m "$PJ_MOD" -v "$PJ_MOD_VER" || echo "dkms add $PJ_MOD failed"
-	fi
-	if dkms install -m "$PJ_MOD" -v "$PJ_MOD_VER" --force; then
-		modprobe pijuice_power || echo "modprobe pijuice_power failed (module loads on next boot)"
-	else
-		echo "dkms install $PJ_MOD failed; is raspberrypi-kernel-headers installed?"
-	fi
-else
-	echo "dkms or module source missing; skipping pijuice_power build"
+PJ_MOD_VER=1.1
+if ! command -v dkms > /dev/null 2>&1; then
+	echo "pijuice-base: dkms not installed, cannot build $PJ_MOD" >&2
+	exit 1
 fi
+# Drop other registered versions (e.g. 1.0) so only this one is built per kernel.
+for v in $(dkms status -m "$PJ_MOD" 2>/dev/null | sed -n "s|^$PJ_MOD/\([^,]*\),.*|\1|p" | sort -u); do
+	[ "$v" = "$PJ_MOD_VER" ] || dkms remove -m "$PJ_MOD" -v "$v" --all
+done
+if ! dkms status -m "$PJ_MOD" -v "$PJ_MOD_VER" 2>/dev/null | grep -q "$PJ_MOD"; then
+	dkms add -m "$PJ_MOD" -v "$PJ_MOD_VER" || { echo "pijuice-base: dkms add $PJ_MOD/$PJ_MOD_VER failed" >&2; exit 1; }
+fi
+dkms install -m "$PJ_MOD" -v "$PJ_MOD_VER" --force \
+	|| { echo "pijuice-base: dkms install $PJ_MOD/$PJ_MOD_VER failed (kernel headers installed?)" >&2; exit 1; }
+modprobe -r pijuice_power 2>/dev/null || true
+modprobe pijuice_power || { echo "pijuice-base: modprobe pijuice_power failed" >&2; exit 1; }
+# Pick up a changed unit file and the new daemon.
+systemctl daemon-reload
+systemctl restart pijuice.service
 
 exit 0

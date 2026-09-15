@@ -17,8 +17,8 @@ fi
 # Unregister the pijuice_power DKMS module (built in postinst).
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 	if command -v dkms > /dev/null 2>&1; then
-		if dkms status -m pijuice-power -v 1.0 2>/dev/null | grep -q pijuice-power; then
-			dkms remove -m pijuice-power -v 1.0 --all || true
+		if dkms status -m pijuice-power -v 1.1 2>/dev/null | grep -q pijuice-power; then
+			dkms remove -m pijuice-power -v 1.1 --all || true
 		fi
 	fi
 fi

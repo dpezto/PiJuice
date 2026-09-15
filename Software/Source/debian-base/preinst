@@ -1,10 +1,10 @@
 #!/bin/sh
 set -e
 #
-# Remove any previous pijuice.py in /usr/lib/python3/dist-packages
-# New one is installed in /usr/lib/python3.x/dist-packages which is later in the Python path
+# Remove the symlink older packages' postinst created in /usr/lib/python3/dist-packages;
+# pijuice.py is now shipped there as a real file.
 
-if [ -f /usr/lib/python3/dist-packages/pijuice.py ]; then
+if [ -L /usr/lib/python3/dist-packages/pijuice.py ]; then
     rm /usr/lib/python3/dist-packages/pijuice.py
 fi
 
