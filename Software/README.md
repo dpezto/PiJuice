@@ -70,22 +70,32 @@ that registers a virtual battery named `pijuice`. The `pijuice_sys` service
 pushes live charge, status, voltage, current and temperature into it each poll,
 so any standard tool shows the HAT battery with no extra configuration.
 
-Requires `dkms` and `raspberrypi-kernel-headers` (pulled in as dependencies);
+Requires `dkms` and the kernel headers (`linux-headers-rpi-v8`/`-2712`, pulled in as dependencies);
 the module is built and loaded on install and rebuilt automatically on kernel
 updates. To set it up on a manual install:
 
 ```bash
 sudo apt-get install -y dkms
-sudo cp -r Software/kernel/pijuice_power /usr/src/pijuice-power-1.0
-sudo dkms add -m pijuice-power -v 1.0
-sudo dkms install -m pijuice-power -v 1.0
+sudo cp -r Software/kernel/pijuice_power /usr/src/pijuice-power-1.1
+sudo dkms add -m pijuice-power -v 1.1
+sudo dkms install -m pijuice-power -v 1.1
 echo pijuice_power | sudo tee /etc/modules-load.d/pijuice_power.conf
+sudo cp Software/kernel/pijuice_power/pijuice_power-modprobe.conf /etc/modprobe.d/pijuice_power.conf
 sudo modprobe pijuice_power
 ```
 
-The module's sysfs attributes are `root`-only; the `pijuice.service` unit fixes
-their group ownership on start (via a root `ExecStartPre`) so the unprivileged
-daemon can update the reading.
+The module's writable sysfs attributes are `root`-only; the modprobe `install`
+hook in `/etc/modprobe.d/pijuice_power.conf` hands them to the `pijuice` group
+right after every load (boot or manual `modprobe`), so the unprivileged daemon
+can update the reading. The daemon logs to the journal (once) when the node is
+missing or an attribute is not writable.
+
+Besides `capacity`, the module exposes `charge_full`, `charge_full_design` and
+`charge_now` (µAh, from the HAT battery profile), for readers such as the
+wf-panel-pi battery widget that ignore `capacity`.
+
+Packages are built with `Software/Source/pckg-pijuice.sh` (plain `dpkg-deb`,
+output in `Software/Source/deb_dist/`).
 
 ## GUI Menus
 
