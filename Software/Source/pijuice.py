@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-__version__ = "1.8"
+__version__ = "1.9"
 
 import ctypes
 import functools

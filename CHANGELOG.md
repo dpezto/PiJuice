@@ -46,9 +46,20 @@ pijuice-base; urgency=low
       (`/etc/modules-load.d`). Adds `dkms` + `raspberrypi-kernel-headers` deps
     - src/pijuice_sys.py: the service pushes charge/status/voltage/current/temp
       into the module each 5s poll (`_UpdatePowerSupply`)
-    - pijuice.service: a root `ExecStartPre` hands the pijuice group write
-      access to the module's otherwise root-only sysfs attrs, so the
-      unprivileged daemon can write them
+    - /etc/modprobe.d/pijuice_power.conf: an `install` hook hands the pijuice
+      group write access to the module's otherwise root-only sysfs attrs after
+      every load (replaces the racy udev rule and the service `ExecStartPre`,
+      which missed module reloads)
+    - pijuice_power 1.1: `charge_full`/`charge_full_design`/`charge_now`, so
+      readers that ignore `capacity` (wf-panel-pi batt) show the real charge
+    - src/pijuice_sys.py: journal message (once) when the power_supply node is
+      missing or not writable, instead of ignoring the error
+    - postinst fails the install on DKMS errors
+    - Packaging: pckg-pijuice.sh builds with plain `dpkg-deb`; the stdeb/
+      distutils/dh_systemd pipeline no longer runs on Debian 13. Python modules
+      install to /usr/lib/python3/dist-packages. Depends on
+      linux-headers-rpi-v8 | linux-headers-rpi-2712 (raspberrypi-kernel-headers
+      is gone on Trixie)
 
 ## Version 1.2
 Added packages to both Raspbian Jessie and Stretch

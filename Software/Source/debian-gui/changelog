@@ -1,3 +1,9 @@
+pijuice-gui (1.9) unstable; urgency=low
+
+  * Version bump alongside pijuice-base 1.9.
+
+ -- Dai López <dpezto@gmail.com>  Tue, 15 Sep 2026 09:51:54 -0600
+
 pijuice-gui (1.8) unstable; urgency=low
 
   * General

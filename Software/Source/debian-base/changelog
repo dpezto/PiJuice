@@ -1,3 +1,18 @@
+pijuice-base (1.9) unstable; urgency=low
+
+  * pijuice_power 1.1: expose charge_full/charge_full_design/charge_now so
+    readers that ignore capacity (wf-panel-pi batt) show the real charge.
+  * pijuice_sys: feed charge_full from the battery profile; log power_supply
+    write failures and a missing module to the journal (once) instead of
+    ignoring them.
+  * postinst: fail the install on any DKMS error; remove other registered
+    pijuice-power versions.
+  * Grant sysfs write access via a modprobe install hook instead of the
+    service ExecStartPre, which missed module reloads.
+  * Build with plain dpkg-deb; Python modules in /usr/lib/python3/dist-packages.
+
+ -- Dai López <dpezto@gmail.com>  Tue, 15 Sep 2026 09:51:54 -0600
+
 pijuice-base (1.8) unstable; urgency=low
 
   * General
