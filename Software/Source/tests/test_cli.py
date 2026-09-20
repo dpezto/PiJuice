@@ -181,6 +181,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.rtc.SetAlarm.call_args.args[0]['hour'],'8;12;18')
         self.rtc.SetWakeupEnabled.assert_not_called()
         self.rtc.ClearAlarmFlag.assert_not_called()
+        saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
+        self.assertEqual(saved['wakeup_alarm']['alarm']['hour'], '8;12;18')  # kept for the daemon's boot re-arm
 
     def test_wakeup_disable_failure_restores_enabled_state(self):
         cli.item_chosen('Wakeup Alarm')

@@ -548,14 +548,29 @@ class PiJuiceService(object):
         return _unwrap(self._require().rtcAlarm.GetAlarm(), 'GetAlarm')
 
     def set_alarm(self, alarm):
-        return _unwrap(self._require().rtcAlarm.SetAlarm(alarm), 'SetAlarm')
+        result = _unwrap(self._require().rtcAlarm.SetAlarm(alarm), 'SetAlarm')
+        self._remember_wakeup(alarm=alarm)
+        return result
 
     def get_alarm_control(self):
         return _unwrap(self._require().rtcAlarm.GetControlStatus(), 'GetControlStatus')
 
     def set_wakeup_enabled(self, enabled):
-        return _unwrap(self._require().rtcAlarm.SetWakeupEnabled(bool(enabled)),
-                       'SetWakeupEnabled')
+        result = _unwrap(self._require().rtcAlarm.SetWakeupEnabled(bool(enabled)),
+                         'SetWakeupEnabled')
+        self._remember_wakeup(enabled=bool(enabled))
+        return result
+
+    def _remember_wakeup(self, **fields):
+        """Keep the wanted alarm on disk: the HAT forgets it after a full battery
+        drain, and the daemon re-arms it from here at start (upstream #1035)."""
+        config = load_config(self.config_path)
+        config.setdefault('wakeup_alarm', {}).update(fields)
+        try:
+            save_config(config, self.config_path)
+            self.config = config
+        except OSError as exc:
+            raise PiJuiceError('Alarm set on the device, but not saved for restore: %s' % exc, 'config')
 
     # ── firmware domain ──────────────────────────────────────────────────────
     def flash_firmware(self, bin_file):

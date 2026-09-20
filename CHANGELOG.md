@@ -71,6 +71,11 @@ pijuice-base; urgency=low
       `get_battery_current`, `clear_alarm_flag`, `LED_FUNCTIONS`)
 
 * src/pijuice_sys.py:
+    - Re-arms at start what the HAT forgets after a full battery drain (upstream
+      #1035, #760, #853): the RTC time from the Pi clock, the alarm and wakeup
+      enable the UIs saved to `wakeup_alarm` in the config, and wakeup-on-charge
+      from System Task
+    - Logs through `logging` with journald `<N>` priority prefixes
     - One `GetStatus` per second; battery tracking, the charge limit and the
       power_supply feed run every 5 s regardless of the System Task switch (the
       feed used to stop when System Task was off)

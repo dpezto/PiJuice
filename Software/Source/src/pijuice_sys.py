@@ -16,6 +16,7 @@ import re
 
 from pijuice import PiJuice
 from pijuice_battery import ChargeLimiter, BatteryHistory
+from pijuice_service import rtc_fields_now
 
 
 
@@ -90,6 +91,39 @@ def _EvalChargeLimit(status):
     if message != chargeLimitMessage:
         (log.warning if message.startswith('Charge limiter:') else log.info)(message)
         chargeLimitMessage = message
+
+
+def _RestoreWakeup():
+    """Re-arm what the HAT forgets after a full battery drain (upstream #1035,
+    #760, #853): the RTC clock, the alarm + wakeup enable saved by the UIs, and
+    wakeup-on-charge from System Task. Runs once at daemon start."""
+    now = rtc_fields_now()
+    rtc = pijuice.rtcAlarm.GetTime()
+    if rtc.get('error') == 'NO_ERROR' and rtc['data'].get('year', 0) < 2020 <= now['year']:
+        ret = pijuice.rtcAlarm.SetTime(now)
+        (log.warning if ret.get('error') == 'NO_ERROR' else log.error)(
+            'RTC had lost its time; set from the Pi clock: %s', ret.get('error'))
+    wanted = configData.get('wakeup_alarm') or {}
+    if wanted.get('enabled'):
+        ctrl = pijuice.rtcAlarm.GetControlStatus()
+        if ctrl.get('error') == 'NO_ERROR' and not ctrl['data'].get('alarm_wakeup_enabled'):
+            errors = []
+            if wanted.get('alarm'):
+                errors.append(pijuice.rtcAlarm.SetAlarm(wanted['alarm']).get('error'))
+            errors.append(pijuice.rtcAlarm.SetWakeupEnabled(True).get('error'))
+            errors = [e for e in errors if e != 'NO_ERROR']
+            if errors:
+                log.error('Wakeup alarm was off on the device and could not be re-armed: %s', errors)
+            else:
+                log.warning('Wakeup alarm was off on the device; re-armed from the saved schedule')
+    woc = configData.get('system_task', {}).get('wakeup_on_charge', {})
+    if woc.get('enabled') and woc.get('trigger_level') not in (None, ''):
+        try:
+            ret = pijuice.power.SetWakeUpOnCharge(int(float(woc['trigger_level'])))
+        except (TypeError, ValueError) as exc:
+            ret = {'error': str(exc)}
+        if ret.get('error') != 'NO_ERROR':
+            log.error('Could not arm wakeup on charge: %s', ret.get('error'))
 
 
 def _SystemHalt(event):
@@ -500,6 +534,10 @@ def main():
                         log.warning('RTC os-support not available')
 
     if watchdogEn: _ConfigureWatchdog('ACTIVATE')
+    try:
+        _RestoreWakeup()
+    except Exception as exc:  # never keep the daemon from polling
+        log.error('Wakeup restore failed: %s', exc)
 
     if sysStartEvEn:
         ExecuteFunc(configData['system_events']['sys_start']['function'], 'sys_start', configData)

@@ -169,6 +169,12 @@ On narrow windows, use the back arrow to return to the section list.
 - Alarm times use **UTC**, with the current local equivalent alongside the RTC.
   Hours accept 0–23 or AM/PM, and multiple hours or weekdays can be separated
   by semicolons. Saving a schedule does not automatically enable wakeup.
+- The saved schedule and wakeup switch are also kept in the config file. The
+  HAT forgets them (and the RTC time) after a full battery drain; at start the
+  background service re-arms the alarm, sets a lost RTC from the Pi clock and
+  re-arms wakeup-on-charge from System Task. This cannot help while the Pi is
+  off, so for unattended installs also enable **Restore** (non-volatile) on
+  wakeup-on-charge.
 - **Preview colour** briefly displays the chosen LED colour and restores the
   saved configuration. **Apply** saves the new LED settings.
 - Firmware updates show a busy indicator and prevent closing during the write.
