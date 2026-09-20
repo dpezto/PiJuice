@@ -27,16 +27,15 @@ from gi.repository import AyatanaAppIndicator3 as AppIndicator  # noqa: E402
 # script is run by path (e.g. the desktop autostart entry).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from pijuice_service import PiJuiceService, PiJuiceError  # noqa: E402
+    from pijuice_service import PiJuiceService  # noqa: E402
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from pijuice_service import PiJuiceService, PiJuiceError
+    from pijuice_service import PiJuiceService
 from pijuice import get_versions  # noqa: E402
 
 APP_ID = "pijuice-tray"
 ICON_DIR = "/usr/share/pijuice/data/images"
 REFRESH_INTERVAL = 5000  # ms
-TRAY_PID_FILE = "/run/pijuice/pijuice_tray.pid"
 
 
 def _find_settings_app():
@@ -169,12 +168,6 @@ class PiJuiceTray(object):
 
 
 def main():
-    try:
-        with open(TRAY_PID_FILE, "w") as fh:
-            fh.write(str(os.getpid()))
-    except OSError:
-        pass
-
     tray = PiJuiceTray()
     try:
         Gtk.main()

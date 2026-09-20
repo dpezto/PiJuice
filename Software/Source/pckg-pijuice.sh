@@ -3,8 +3,8 @@
 #
 # Replaces the stdeb/distutils/debhelper pipeline, which no longer runs on
 # Debian 13: distutils is gone since Python 3.12, stdeb crashes on 3.13, and
-# debian/rules called dh_systemd_* (removed in debhelper 13). The install
-# layout below mirrors setup.py's data_files/scripts/py_modules.
+# debian/rules called dh_systemd_* (removed in debhelper 13). This script is
+# the only build path; the install layout is defined here.
 # Output: deb_dist/pijuice-{base,gui}_<version>_all.deb
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -75,7 +75,6 @@ put $B /usr/lib/python3/dist-packages 644 pijuice.py pijuice_service.py pijuice_
 put $B /usr/share/pijuice/data/firmware 644 data/firmware/*
 put $B /etc/udev/rules.d 644 data/99-i2c.rules
 put $B /etc/sudoers.d 440 data/020_pijuice-nopasswd
-put $B /usr/lib/tmpfiles.d 644 data/pijuice.conf
 # Same path as pijuice-base 1.8: moving /lib -> /usr/lib inside one package loses the file on merged-/usr systems.
 put $B /lib/systemd/system 644 debian-base/pijuice.service
 put $B "/usr/src/pijuice-power-$MOD_VER" 644 ../kernel/pijuice_power/pijuice_power.c \

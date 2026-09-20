@@ -16,13 +16,15 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 
-static int capacity = 50;
+/* Nothing is known until the daemon writes: no phantom half-full battery. */
+static int capacity;
 static int status = POWER_SUPPLY_STATUS_UNKNOWN;
-static int present = 1;
+static int present;
 static int voltage_now;		/* microvolts */
 static int current_now;		/* microamps */
 static int temp;		/* tenths of a degree Celsius */
-static int charge_full;		/* microamp-hours, from the HAT battery profile */
+static int charge_full;		/* microamp-hours, learned or profile capacity */
+static int charge_full_design;	/* microamp-hours, from the HAT battery profile */
 
 static enum power_supply_property pijuice_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
@@ -65,12 +67,14 @@ static int pijuice_get_property(struct power_supply *psy,
 		val->intval = temp;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+		val->intval = charge_full_design;
+		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		val->intval = charge_full;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		/* Derived, so it can never disagree with capacity. */
-		val->intval = capacity * (charge_full / 100);
+		val->intval = (int)((long long)charge_full * capacity / 100);
 		break;
 	default:
 		return -EINVAL;
@@ -82,6 +86,13 @@ static int pijuice_set_property(struct power_supply *psy,
 				enum power_supply_property psp,
 				const union power_supply_propval *val)
 {
+	union power_supply_propval cur;
+
+	/* The daemon rewrites every attribute each poll; only a real change
+	 * is worth a uevent (upower and desktops wake on each one). */
+	if (!pijuice_get_property(psy, psp, &cur) && cur.intval == val->intval)
+		return 0;
+
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		status = val->intval;
@@ -104,6 +115,9 @@ static int pijuice_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		charge_full = val->intval;
 		break;
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+		charge_full_design = val->intval;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -122,6 +136,7 @@ static int pijuice_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 	case POWER_SUPPLY_PROP_TEMP:
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		return 1;
 	default:
 		return 0;
@@ -171,4 +186,4 @@ module_exit(pijuice_power_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PiJuice virtual power_supply, fed by the pijuice_sys daemon");
 MODULE_AUTHOR("PiJuice");
-MODULE_VERSION("1.1");
+MODULE_VERSION("1.2");

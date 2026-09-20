@@ -7,6 +7,10 @@ After=dev-i2c\x2d1.device
 Type=idle
 User=pijuice
 WorkingDirectory=/var/lib/pijuice/
+# /run/pijuice holds the daemon pid and the CLI/GUI single-instance locks.
+RuntimeDirectory=pijuice
+RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/bin/pijuice_sys.py
 ExecStopPost=/usr/bin/pijuice_sys.py stop
 Restart=always

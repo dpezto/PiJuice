@@ -43,7 +43,6 @@ chmod 660 /var/lib/pijuice/pijuice_config.JSON
 chown pijuice:pijuice /usr/bin/pijuice_cli32 /usr/bin/pijuice_cli64
 chmod 4755 /usr/bin/pijuice_cli32 /usr/bin/pijuice_cli64
 chown pijuice:pijuice /usr/bin/pijuice_cli.py
-chmod -x /usr/bin/pijuice_cli.py
 
 # Link to pijuice_cli and pijuiceboot for current architecture
 arch=$(dpkg --print-architecture)
@@ -109,7 +108,7 @@ fi
 # The pijuice_sys daemon pushes live values into it each poll.
 # Fails the package install on any DKMS error: a silently missing module is worse.
 PJ_MOD=pijuice-power
-PJ_MOD_VER=1.1
+PJ_MOD_VER=1.2
 if ! command -v dkms > /dev/null 2>&1; then
 	echo "pijuice-base: dkms not installed, cannot build $PJ_MOD" >&2
 	exit 1
