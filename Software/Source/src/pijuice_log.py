@@ -17,8 +17,12 @@
 # Read to file: python3 pijuice_log.py ./pijuice_log.txt
 # Disable logging: python3 pijuice_log.py --disable
 
-from pijuice import PiJuice, PiJuiceInterface
-import time, datetime, sys, argparse
+import argparse
+import datetime
+import sys
+import time
+
+from pijuice_service import PiJuiceService
 
 LOGGING_CMD = 0xF6  # 246
 LOG_MSG_FRAME_SIZE = 31
@@ -244,7 +248,7 @@ LOG_MSG_DEFS = [
     {"name": "WAKEUP_EVT  ", "parser": Parse_WAKEUP_EVT},
     {"name": "ALARM_EVT  ", "parser": Parse_ALARM_EVT},
     {"name": "MCU_RESET  ", "parser": Parse_MCU_RESET},
-    {"name": "RESERVED1", "parser": {}},
+    {"name": "RESERVED2", "parser": {}},
     {"name": "ALARM_WRITE  ", "parser": Parse_ALARM_EVT},
 ]
 
@@ -378,98 +382,100 @@ def GetDateTime(buf):
     return ts
 
 
-ifs = PiJuiceInterface(1, 0x14)
+def _parse(data):
+    """Log records without a dedicated parser (MESSAGE, VALUE, reserved) are dumped raw."""
+    kind = data[1] if len(data) > 1 and data[1] < len(LOG_MSG_DEFS) else None
+    if kind is None:
+        return "%s UNKNOWN %s" % (data[0], data[2:])
+    parser = LOG_MSG_DEFS[kind]["parser"]
+    if callable(parser):
+        return parser(data)
+    return "%s %s %s" % (data[0], LOG_MSG_DEFS[kind]["name"].strip(), data[2:])
 
 
 def GetPiJuiceLog(ifs):
     logStrOut = []
-    i = 0
-    while True:
+    for _ in range(1000):  # ponytail: a bound instead of trusting the end marker forever
         ret = ifs.ReadData(LOGGING_CMD, 31)
-        if ret["error"] == "NO_ERROR":
-            if ret["data"][1] == 0:
-                return {"data": logStrOut, "error": "NO_ERROR"}
-
-            s = LOG_MSG_DEFS[ret["data"][1]]["parser"](ret["data"])
-            logStrOut.insert(0, s)
-
-            time.sleep(0.01)
-        else:  # elif ret['error'] == 'COMMUNICATION_ERROR':
+        if ret["error"] != "NO_ERROR":
             print(ret)
             return ret
+        if ret["data"][1] == 0:
+            break
+        logStrOut.insert(0, _parse(ret["data"]))
+        time.sleep(0.01)
+    return {"data": logStrOut, "error": "NO_ERROR"}
 
 
-parser = argparse.ArgumentParser(description="Read log messages from PiJuice")
-parser.add_argument("--enable", type=str, help="Enable logging for specific events (pipe-separated)")
-parser.add_argument("--get_config", action="store_true", help="Get current logging configuration")
-parser.add_argument("--disable", action="store_true", help="Disable logging")
-parser.add_argument("outfile", nargs="?", type=str, help="Output file to append logs to")
-
-args = parser.parse_args()
-
-if args.enable is not None:
-    cfgList = args.enable.split("|")
-    config = 0x00
-    for i in range(0, len(LOG_ENABLE_LIST)):
-        if LOG_ENABLE_LIST[i] in cfgList:
-            config |= 0x01 << i
-    if config == 0x00:
-        print("Invalid parameter")
-        exit(-1)
+def _set_enable(ifs, config):
     ifs.WriteData(LOGGING_CMD, [0x01, config])
     time.sleep(0.1)
     ret = ifs.ReadData(LOGGING_CMD, 31)
-    if ret["error"] == "NO_ERROR":
-        d = ret["data"]
-        if d[1] == 0 and d[2] == 0x01 and d[3] == config:
-            print("Log enable configured successfully", hex(config))
-            exit(0)
-        else:
-            print("Failed to configure log enable", hex(config), d)
-            exit(-1)
+    d = ret.get("data") or []
+    return ret["error"] == "NO_ERROR" and d[1:4] == [0, 0x01, config]
 
-if args.get_config:
-    ifs.WriteData(LOGGING_CMD, [0x02])
-    time.sleep(0.1)
-    ret = ifs.ReadData(LOGGING_CMD, 31)
-    if ret["error"] == "NO_ERROR" and ret["data"][1] == 0 and ret["data"][2] == 1:
-        print("|".join(LOG_ENABLE_LIST[i] for i in range(7) if ret["data"][3] & (1 << i)))
-        exit(0)
-    else:
+
+def main():
+    parser = argparse.ArgumentParser(description="Read log messages from PiJuice (firmware >= 1.6)")
+    parser.add_argument("--enable", type=str, help="Enable logging for specific events (pipe-separated)")
+    parser.add_argument("--get_config", action="store_true", help="Get current logging configuration")
+    parser.add_argument("--disable", action="store_true", help="Disable logging")
+    parser.add_argument("outfile", nargs="?", type=str, help="Output file to append logs to")
+    args = parser.parse_args()
+
+    service = PiJuiceService()  # honours i2c_bus / i2c_addr from the shared config
+    if not service.available:
+        print("No connection to PiJuice")
+        return 1
+    ifs = service.pj.config.interface
+
+    if args.enable is not None:
+        cfgList = args.enable.split("|")
+        config = 0x00
+        for i, name in enumerate(LOG_ENABLE_LIST):
+            if name in cfgList:
+                config |= 0x01 << i
+        if config == 0x00:
+            print("Invalid parameter")
+            return 1
+        ok = _set_enable(ifs, config)
+        print(("Log enable configured successfully %s" if ok else "Failed to configure log enable %s") % hex(config))
+        return 0 if ok else 1
+
+    if args.get_config:
+        ifs.WriteData(LOGGING_CMD, [0x02])
+        time.sleep(0.1)
+        ret = ifs.ReadData(LOGGING_CMD, 31)
+        if ret["error"] == "NO_ERROR" and ret["data"][1] == 0 and ret["data"][2] == 1:
+            print("|".join(LOG_ENABLE_LIST[i] for i in range(7) if ret["data"][3] & (1 << i)))
+            return 0
         print(ret)
-        exit(-1)
-    exit(0)
+        return 1
 
-if args.disable:
-    ifs.WriteData(LOGGING_CMD, [0x01, 0x00])
-    time.sleep(0.1)
-    ret = ifs.ReadData(LOGGING_CMD, 31)
-    if ret["error"] == "NO_ERROR":
-        d = ret["data"]
-        if d[1] == 0 and d[2] == 0x01 and d[3] == 0x00:
-            print("Logging disabled successfully")
-            exit(0)
-        else:
-            print("Failed to disable logging")
-            exit(-1)
+    if args.disable:
+        ok = _set_enable(ifs, 0x00)
+        print("Logging disabled successfully" if ok else "Failed to disable logging")
+        return 0 if ok else 1
 
-ifs.WriteData(LOGGING_CMD, [0])
-time.sleep(0.01)
-ret = GetPiJuiceLog(ifs)
-if ret["error"] != "NO_ERROR":
-    time.sleep(0.5)
-    ifs.WriteData(LOGGING_CMD, [0])
-    time.sleep(0.01)
-    ret = GetPiJuiceLog(ifs)
-
-if ret["error"] == "NO_ERROR":
+    for _ in range(2):
+        ifs.WriteData(LOGGING_CMD, [0])
+        time.sleep(0.01)
+        ret = GetPiJuiceLog(ifs)
+        if ret["error"] == "NO_ERROR":
+            break
+        time.sleep(0.5)
+    if ret["error"] != "NO_ERROR":
+        print("failed to read log")
+        return 1
     if args.outfile:
         with open(args.outfile, "a") as file:
-            for s in ret["data"]:
-                file.write(s + "\n")
+            for line in ret["data"]:
+                file.write(line + "\n")
     else:
-        for s in ret["data"]:
-            print(s)
-else:
-    print("failed to read log")
-    exit(-1)
+        for line in ret["data"]:
+            print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

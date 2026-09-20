@@ -222,6 +222,11 @@ class BatteryHistory:
         self.floor = None
         self.last_save = None
 
+    def capacity_mah(self):
+        """Median learned full capacity, or None until a session qualifies."""
+        samples = (self.state or {}).get('samples') or []
+        return statistics.median(s['capacity_mah'] for s in samples) if samples else None
+
     def save(self, now=None):
         if self.state is None:
             return

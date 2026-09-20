@@ -211,10 +211,8 @@ class PiJuiceStatus(object):
     def ResetFaultFlags(self, flags):
         d = 0xFF
         for ev in flags:
-            try:
+            if ev in self.faultEvents:
                 d = d & ~(0x01 << self.faultEvents.index(ev))
-            except:
-                ev
         self.interface.WriteData(self.FAULT_EVENT_CMD, [d])  # clear fault events
 
     buttonEvents = ['NO_EVENT', 'PRESS', 'RELEASE',
@@ -531,7 +529,7 @@ class PiJuiceRtcAlarm(object):
                 s = int(dt['second'])
             except:
                 return {'error': 'INVALID_SECOND'}
-            if s < 0 or s > 60:
+            if s < 0 or s > 59:
                 return {'error': 'INVALID_SECOND'}
             d[0] = ((s // 10) & 0x0F) << 4
             d[0] = d[0] | ((s % 10) & 0x0F)
@@ -541,7 +539,7 @@ class PiJuiceRtcAlarm(object):
                 m = int(dt['minute'])
             except:
                 return {'error': 'INVALID_MINUTE'}
-            if m < 0 or m > 60:
+            if m < 0 or m > 59:
                 return {'error': 'INVALID_MINUTE'}
             d[1] = ((m // 10) & 0x0F) << 4
             d[1] = d[1] | ((m % 10) & 0x0F)
@@ -622,7 +620,7 @@ class PiJuiceRtcAlarm(object):
 
         if 'subsecond' in dt:
             try:
-                s = int(dt['subsecond']) * 256
+                s = int(float(dt['subsecond']) * 256)  # fraction of a second -> 1/256 units
             except:
                 return {'error': 'INVALID_SUBSECOND'}
             if s < 0 or s > 255:
@@ -732,7 +730,7 @@ class PiJuiceRtcAlarm(object):
                 s = int(alarm['second'])
             except:
                 return {'error': 'INVALID_SECOND'}
-            if s < 0 or s > 60:
+            if s < 0 or s > 59:
                 return {'error': 'INVALID_SECOND'}
             d[0] = ((s // 10) & 0x0F) << 4
             d[0] = d[0] | ((s % 10) & 0x0F)
@@ -742,7 +740,7 @@ class PiJuiceRtcAlarm(object):
                 m = int(alarm['minute'])
             except:
                 return {'error': 'INVALID_MINUTE'}
-            if m < 0 or m > 60:
+            if m < 0 or m > 59:
                 return {'error': 'INVALID_MINUTE'}
             d[1] = ((m // 10) & 0x0F) << 4
             d[1] = d[1] | ((m % 10) & 0x0F)
@@ -1038,7 +1036,7 @@ class PiJuiceConfig(object):
     batteryProfiles = ['PJZERO_1000', 'BP7X_1820', 'SNN5843_2300', 'PJLIPO_12000', 'PJLIPO_5000', 'PJBP7X_1600', 'PJSNN5843_1300', 'PJZERO_1200', 'BP6X_1400', 'PJLIPO_600', 'PJLIPO_500', 'PJLIPO_2500']
     def SelectBatteryProfiles(self, fwver):
         if fwver >= 0x15:
-            self.batteryProfiles = self.batteryProfiles
+            pass  # class default: the full list
         elif fwver >= 0x14:
             self.batteryProfiles = ['PJZERO_1000', 'BP7X_1820', 'SNN5843_2300', 'PJLIPO_12000', 'PJLIPO_5000', 'PJBP7X_1600', 'PJSNN5843_1300', 'PJZERO_1200', 'BP6X_1400', 'PJLIPO_600', 'PJLIPO_500']
         elif fwver == 0x13:
@@ -1582,7 +1580,7 @@ def get_versions():
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == '--version':
+    if len(sys.argv) > 1 and sys.argv[1] == '--version':
         sw_version, fw_version, os_version = get_versions()
         print("Software version: %s" % sw_version)
         if fw_version is None:

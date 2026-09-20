@@ -2,12 +2,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function
 
-import calendar
-import datetime
-import getopt
 import grp
 import json
-import logging
 import os
 import pwd
 import signal
@@ -68,9 +64,9 @@ def _TrackBattery():
 
 def _EvalChargeLimit(status):
     global chargeLimiter, chargeLimitMessage
-    if chargeLimiter is None:
-        chargeLimiter = ChargeLimiter()
     try:
+        if chargeLimiter is None:
+            chargeLimiter = ChargeLimiter()
         message = chargeLimiter.step(pijuice, configData.get('battery_management', {}), status)
     except Exception as exc:
         message = 'Charge limiter: ' + str(exc)
@@ -356,8 +352,11 @@ def _UpdatePowerSupply(status):
         if prof.get('error') == 'NO_ERROR' and isinstance(prof['data'].get('capacity'), int):
             _batCapacityMah = prof['data']['capacity']
     if _batCapacityMah:
-        # Written every poll (no I2C) so a module reload picks it up again.
-        _write_power_supply('charge_full', _batCapacityMah * 1000)   # mAh -> uAh
+        # Written every poll (no I2C) so a module reload picks it up again; the
+        # module only raises a uevent when a value actually changes.
+        learned = batteryHistory.capacity_mah() if batteryHistory is not None else None
+        _write_power_supply('charge_full_design', _batCapacityMah * 1000)          # mAh -> uAh
+        _write_power_supply('charge_full', int(learned or _batCapacityMah) * 1000)
     bat = status.get('battery')
     charge = pijuice.status.GetChargeLevel().get('data')
     if bat == 'NOT_PRESENT':
@@ -417,6 +416,8 @@ def main():
             ChargeLimiter().release(pijuice)
         except Exception as exc:
             print('Unable to release charge limit on stop: %s' % exc, flush=True)
+        if os.path.isdir(POWER_SUPPLY_DIR):
+            _write_power_supply('present', 0)  # nobody feeds it now; don't show a stale battery
 
         if sysStopEvEn:
             ExecuteFunc(configData['system_events']['sys_stop']['function'], 'sys_stop', configData)
@@ -487,41 +488,37 @@ def main():
     if sysStartEvEn:
         ExecuteFunc(configData['system_events']['sys_start']['function'], 'sys_start', configData)
 
-    timeCnt = 2#5
-
     def stop_tracking(_signum, _frame):
         global dopoll
         dopoll = False
     signal.signal(signal.SIGTERM, stop_tracking)
-    limitTicks = 0
+    tick = 0
     while dopoll:
-        if limitTicks == 0:
+        ret = pijuice.status.GetStatus()
+        if ret['error'] != 'NO_ERROR':
+            print(ret, flush=True)
+            time.sleep(1)
+            continue
+        status = ret['data']
+        task = configData.get('system_task', {}).get('enabled')
+        if task and status['isButton']:
+            _EvalButtonEvents()
+        if tick == 0:
+            # Every 5 s. Battery tracking, the charge limit and the power_supply
+            # feed run regardless of the System Task switch.
             _TrackBattery()
-            limitStatus = pijuice.status.GetStatus()
-            if limitStatus.get('error') == 'NO_ERROR':
-                _EvalChargeLimit(limitStatus.get('data'))
-        limitTicks = (limitTicks + 1) % 5
-        if configData.get('system_task', {}).get('enabled'):
-            ret = pijuice.status.GetStatus()
-            if ret['error'] == 'NO_ERROR':
-                status = ret['data']
-                if status['isButton']:
-                    _EvalButtonEvents()
-
-                timeCnt -= 1
-                if timeCnt == 0:
-                    timeCnt = 5
-                    _UpdatePowerSupply(status)
-                    if ('isFault' in status) and status['isFault']:
-                        _EvalFaultFlags()
-                    if minChgEn:
-                        _EvalCharge(status)
-                    if minBatVolEn:
-                        _EvalBatVoltage(status)
-                    if noPowEn or PowEn:
-                        _EvalPowerInputs(status)
-            else:
-                print(ret)
+            _EvalChargeLimit(status)
+            _UpdatePowerSupply(status)
+            if task:
+                if status.get('isFault'):
+                    _EvalFaultFlags()
+                if minChgEn:
+                    _EvalCharge(status)
+                if minBatVolEn:
+                    _EvalBatVoltage(status)
+                if noPowEn or PowEn:
+                    _EvalPowerInputs(status)
+        tick = (tick + 1) % 5
         time.sleep(1)
 
     if batteryHistory is not None:

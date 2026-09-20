@@ -129,6 +129,13 @@ class HistoryTests(unittest.TestCase):
         self.assertFalse(history_report(self.path)['active'])
         self.assertIn('Paused', history_report(self.path)['text'])
 
+    def test_learned_capacity_feeds_power_supply_only_after_a_session(self):
+        self.assertIsNone(self.history.capacity_mah())
+        self.sample(80)
+        self.assertIsNone(self.history.capacity_mah())
+        self.history.state['samples'] = [{'capacity_mah': 1500}, {'capacity_mah': 1700}, {'capacity_mah': 1600}]
+        self.assertEqual(self.history.capacity_mah(), 1600)
+
     def test_write_frequency_is_bounded_and_snapshot_readable(self):
         with patch.object(self.history, 'save', wraps=self.history.save) as save:
             for i in range(30): self.sample(80)
