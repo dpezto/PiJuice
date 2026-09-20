@@ -640,11 +640,15 @@ class LedView(_View):
         r = self.spin_row(group, "Red", 0, 255)[1]
         g = self.spin_row(group, "Green", 0, 255)[1]
         b = self.spin_row(group, "Blue", 0, 255)[1]
+        limit = self.spin_row(group, "Brightness limit (%)", 10, 100, value=100)[1]
+        limit.set_tooltip_text("The three channels share one current budget, so a bright white loses "
+                               "a channel. Colours are scaled to this before they are written; "
+                               "lower it until white shows all three.")
         test = Gtk.Button(label="Preview colour")
         test.add_css_class("flat")
         test.connect("clicked", self._on_test, led)
         group.set_header_suffix(test)
-        self._rows[led] = {"function": func, "r": r, "g": g, "b": b}
+        self._rows[led] = {"function": func, "r": r, "g": g, "b": b, "limit": limit}
         def custom_colour(_spin):
             if not self._loading:
                 self.combo_set(func, "USER_LED", LED_USER_SELECTABLE)
@@ -654,14 +658,16 @@ class LedView(_View):
     def refresh(self):
         for led in self._rows:
             self.run_async(
-                lambda led=led: (led, self.service.get_led_config(led)), self._apply_one
+                lambda led=led: (led, self.service.get_led_config(led), self.service.get_led_limit(led)),
+                self._apply_one,
             )
 
-    def _apply_one(self, pair):
-        led, cfg = pair
+    def _apply_one(self, triple):
+        led, cfg, limit = triple
         row = self._rows.get(led)
         if not row or not cfg:
             return
+        row["limit"].set_value(limit)
         self.combo_set(row["function"], cfg.get("function", "NOT_USED"), LED_USER_SELECTABLE)
         param = cfg.get("parameter", {})
         for ch in ("r", "g", "b"):
@@ -679,9 +685,10 @@ class LedView(_View):
         }
 
     def _on_apply(self, _btn):
-        configs = [(led, self._row_config(led)) for led in self._rows]
+        configs = [(led, self._row_config(led), self._rows[led]["limit"].get_value_as_int()) for led in self._rows]
         def work():
-            for led, cfg in configs:
+            for led, cfg, limit in configs:
+                self.service.set_led_limit(led, limit)
                 self.service.set_led_config(led, cfg)
         self.run_async(work, lambda _r: self.flash("LED settings applied."), write=True)
 

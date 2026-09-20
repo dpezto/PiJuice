@@ -141,6 +141,26 @@ def function_description(name, config=None):
     return ''
 
 
+def led_limit(config, led):
+    """Brightness limit (10-100 %) for *led* from the config's ``led_limits``."""
+    try:
+        return max(10, min(100, int((config or {}).get('led_limits', {}).get(led, 100))))
+    except (TypeError, ValueError):
+        return 100
+
+
+def _scale_led(config, factor):
+    if not isinstance(config, dict) or not isinstance(config.get('parameter'), dict):
+        return config
+    parameter = {}
+    for channel, value in config['parameter'].items():
+        try:
+            parameter[channel] = max(0, min(255, round(int(value) * factor)))
+        except (TypeError, ValueError):
+            parameter[channel] = value
+    return dict(config, parameter=parameter)
+
+
 def readable(value):
     """Enum -> label shared by both UIs so wording never drifts."""
     aliases = {'PRESENT': 'Connected', 'NOT_PRESENT': 'Not connected', 'NORMAL': 'On battery',
@@ -497,14 +517,26 @@ class PiJuiceService(object):
     def leds(self):
         return self._require().config.leds
 
+    # The three diodes of an RGB LED share one current budget; at high duty the
+    # blue one (highest forward voltage) starves first, so white turns yellow.
+    # A per-LED brightness limit scales every colour before it reaches the
+    # firmware and scales it back on read, so the UIs show what the user set.
+    def get_led_limit(self, led):
+        return led_limit(load_config(self.config_path), led)
+
+    def set_led_limit(self, led, percent):
+        limits = dict(load_config(self.config_path).get('led_limits') or {})
+        limits[led] = validate_number(percent, 'int', 10, 100)
+        return self.save_section('led_limits', limits)
+
     def get_led_config(self, led):
         pj = self._require()
-        return _unwrap(pj.config.GetLedConfiguration(led),
-                       'GetLedConfiguration')
+        config = _unwrap(pj.config.GetLedConfiguration(led), 'GetLedConfiguration')
+        return _scale_led(config, 100 / self.get_led_limit(led))
 
     def set_led_config(self, led, config):
         pj = self._require()
-        return _unwrap(pj.config.SetLedConfiguration(led, config),
+        return _unwrap(pj.config.SetLedConfiguration(led, _scale_led(config, self.get_led_limit(led) / 100)),
                        'SetLedConfiguration')
 
     # ── battery domain ───────────────────────────────────────────────────────

@@ -747,22 +747,27 @@ class LEDTab(object):
                 user_args=[{"color_index": colors.index(color), "led_index": index}],
             )
             elements.append(attrmap(color_edit))
-        elements.extend(
-            [
-                urwid.Divider(),
-                urwid.Padding(
-                    attrmap(ActionButton("Back", on_press=self.main)), width=8
-                ),
-            ]
-        )
+        limit_edit = urwid.Edit("Brightness limit [%]: ", edit_text=str(self.current_config[index]["limit"]))
+        urwid.connect_signal(limit_edit, "change", self._set_limit, user_args=[index])
+        elements += [
+            urwid.Divider(),
+            attrmap(limit_edit),
+            urwid.Text(("muted", "Keeps all three channels lit: the colour is scaled to this before it is written.")),
+            urwid.Divider(),
+            urwid.Padding(attrmap(ActionButton("Back", on_press=self.main)), width=8),
+        ]
         main.original_widget = urwid.Filler(urwid.Pile(elements), valign="top")
+
+    def _set_limit(self, index, edit, text):
+        self.current_config[index]["limit"] = _validate_edit(edit, text, "int", 10, 100, self.LED_NAMES[index] + " limit")
 
     def _get_led_config(self):
         config = []
         for name in self.LED_NAMES:
             result = service.get_led_config(name)
             config.append({"function": result.get("function", self.LED_FUNCTIONS_OPTIONS[0]),
-                           "color": [result["parameter"][c] for c in ("r", "g", "b")]})
+                           "color": [result["parameter"][c] for c in ("r", "g", "b")],
+                           "limit": service.get_led_limit(name)})
         return config
 
     def _refresh_settings(self, *args):
@@ -772,7 +777,9 @@ class LEDTab(object):
         for led in self.current_config:
             for value in led["color"]:
                 validate_value(value, "int", 0, 255, None)
+            validate_value(led["limit"], "int", 10, 100, None)
         for i in range(len(self.LED_NAMES)):
+            service.set_led_limit(self.LED_NAMES[i], self.current_config[i]["limit"])
             config = {
                 "function": self.current_config[i]["function"],
                 "parameter": {

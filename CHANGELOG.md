@@ -106,6 +106,10 @@ pijuice-base; urgency=low
     - The window is sized to its content (raspi-config style, up to 78
       columns) instead of filling the terminal
 
+* LEDs: a per-LED brightness limit (10–100 %) in both apps. The RGB diodes
+  share one current budget, so a bright white dropped a channel; colours are
+  scaled to the limit before they reach the firmware and scaled back on read
+
 * Cosmetics, both apps:
     - Button and event functions are shown by what they do ("Power on",
       "Halt, then power off") with a one-line description of each; the

@@ -184,6 +184,13 @@ On narrow windows, use the back arrow to return to the section list.
   wakeup-on-charge.
 - **Preview colour** briefly displays the chosen LED colour and restores the
   saved configuration. **Apply** saves the new LED settings.
+- **Brightness limit** (per LED, both apps): the three diodes of an RGB LED
+  share one current budget, so a bright white loses a channel (blue, with the
+  highest forward voltage, starves first; the firmware's own default charge
+  colour is 60/60/100). The limit scales every colour you set before it is
+  written and scales it back on read, ratio kept, so 255/255/255 stays white.
+  Find it by trial: lower the limit until white shows all three channels.
+  Stored as `led_limits` in the config; the firmware never sees it.
 - Firmware updates show a busy indicator and prevent closing during the write.
   Power is checked again immediately before flashing. Failed updates offer retry.
 - If settings were saved but the daemon could not reload them, use **Retry

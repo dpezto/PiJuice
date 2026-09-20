@@ -131,6 +131,22 @@ class CliTests(unittest.TestCase):
         cli.apply_draft()
         self.assertEqual(self.config.SetLedConfiguration.call_count,2)
 
+    def test_led_limit_is_saved_and_colours_scaled(self):
+        cli.item_chosen('LEDs')
+        cli._active_tab.configure_led(None, 1)
+        limit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w, urwid.Edit) and 'limit' in w.caption)
+        limit.set_edit_text('999')
+        cli.apply_draft()
+        self.config.SetLedConfiguration.assert_not_called()
+        limit.set_edit_text('50')
+        with patch.object(pijuice_service, 'notify_service', return_value=0):
+            cli.go_back()
+            cli.apply_draft()
+        saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
+        self.assertEqual(saved['led_limits'], {'D1': 100, 'D2': 50})
+        self.assertEqual(self.config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 5, 'g': 10, 'b': 15})
+        cli.main_menu()
+
     def test_nested_back_and_menu_preserve_led_draft(self):
         cli.item_chosen('LEDs')
         tab = cli._active_tab
