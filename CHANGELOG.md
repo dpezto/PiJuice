@@ -111,7 +111,9 @@ pijuice-base; urgency=low
   so a bright white dropped a channel; colours are mapped through the white
   point before they reach the firmware and mapped back on read. Hex input and
   a truecolor swatch in the CLI, a colour picker in the GTK app, Preview on the
-  LED in both
+  LED in both, Apply on the LED's own screen (and on a button's screen), what
+  each function does shown next to it, and `PiJuiceService.set_led_state` for
+  scripts that want the white point too
 
 * Cosmetics, both apps:
     - Button and event functions are shown by what they do ("Power on",

@@ -49,6 +49,10 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 60, 'g': 100, 'b': 60})
         self.assertEqual(self.service.get_led_config('D2')['parameter'], {'r': 255, 'g': 255, 'b': 255})
         self.assertEqual(self.service.get_led_white('D1'), [255, 255, 255])
+        status = Mock(); status.SetLedState.return_value = {'error': 'NO_ERROR'}
+        self.service.pj = SimpleNamespace(config=config, status=status)
+        self.service.set_led_state('D2', [255, 255, 255])          # scripts get the white point too
+        status.SetLedState.assert_called_once_with('D2', [60, 100, 60])
         self.assertEqual(svc.led_white({'led_limits': {'D1': 50}}, 'D1'), [128, 128, 128])  # old limit migrates
 
     def test_image_must_look_like_a_pijuice_firmware(self):

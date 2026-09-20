@@ -35,6 +35,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 from pijuice_battery import profile_label
 
 from pijuice_service import (  # noqa: E402
+    LED_FUNCTIONS_INFO,
     LED_USER_SELECTABLE,
     PiJuiceError,
     PiJuiceService,
@@ -637,6 +638,10 @@ class LedView(_View):
     def _build_led_group(self, led):
         group = self.add_group(led)
         func = self.combo_row(group, "Function", LED_USER_SELECTABLE)
+        def describe(*_args):
+            func.set_subtitle(LED_FUNCTIONS_INFO.get(self.combo_get(func, LED_USER_SELECTABLE, "NOT_USED"), ""))
+        func.connect("notify::selected", describe)
+        describe()
         colour_row = Adw.ActionRow(title="Colour", subtitle="Pick, or set the channels below")
         picker = Gtk.ColorButton(valign=_CENTER, use_alpha=False, title="LED colour")
         colour_row.add_suffix(picker)

@@ -49,6 +49,15 @@ PID_FILE_DEFAULT = '/run/pijuice/pijuice_sys.pid'
 
 # ON_OFF_STATUS is firmware-driven; the UIs never offer it.
 LED_USER_SELECTABLE = ['NOT_USED', 'CHARGE_STATUS', 'USER_LED']
+# What each LED function does (from the firmware: battery.c / led.c).
+LED_FUNCTIONS_INFO = {
+    'NOT_USED': 'Off.',
+    'CHARGE_STATUS': 'Firmware shows the charge: above 50 % green (G), 15–50 % red+green, below 15 % red (R). '
+                     'Blue (B) blinks while charging and stays on when full. The three values are the '
+                     'brightness of each part; dimmed when the HAT is in low-power mode.',
+    'USER_LED': 'Shows this colour until a script changes it (only this function accepts '
+                'SetLedState / SetLedBlink). Use 0, 0, 0 for off until your script lights it.',
+}
 
 # pijuiceboot exit codes (returncode = 256 - index).
 FIRMWARE_UPDATE_ERRORS = ['NO_ERROR', 'I2C_BUS_ACCESS_ERROR', 'INPUT_FILE_OPEN_ERROR',
@@ -545,6 +554,11 @@ class PiJuiceService(object):
         whites = dict(load_config(self.config_path).get('led_white') or {})
         whites[led] = [validate_number(v, 'int', 1, 255) for v in rgb]
         return self.save_section('led_white', whites)
+
+    def set_led_state(self, led, rgb):
+        """Live colour for scripts (function must be USER_LED), through the white point."""
+        colour = _scale_led({'parameter': dict(zip('rgb', rgb))}, self.get_led_white(led), to_device=True)
+        return _unwrap(self._require().status.SetLedState(led, [colour['parameter'][c] for c in 'rgb']), 'SetLedState')
 
     def get_led_config(self, led):
         pj = self._require()

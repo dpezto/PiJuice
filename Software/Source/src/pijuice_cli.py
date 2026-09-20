@@ -26,6 +26,7 @@ from pijuice import (
 # GTK app and tray, so the I2C domain logic lives in exactly one place.
 from pijuice_service import (
     CONFIG_PATH_DEFAULT,
+    LED_FUNCTIONS_INFO,
     PID_FILE_DEFAULT,
     PiJuiceError,
     PiJuiceService,
@@ -764,6 +765,7 @@ class LEDTab(object):
             user_data=index,
         )
         elements.append(urwid.Padding(attrmap(self._function_button), width=30))
+        elements.append(urwid.Text(("muted", LED_FUNCTIONS_INFO.get(self.current_config[index]["function"], ""))))
         self._syncing = False
         self._swatch = urwid.Text(("swatch", "        "))
         self._hex_edit = urwid.Edit("Hex: ", edit_text=_rgb_to_hex(self.current_config[index]["color"]))
@@ -793,6 +795,7 @@ class LEDTab(object):
             urwid.Text(("muted", "The raw values at which this LED shows white (255,255,255 = uncalibrated). "
                                  "Every colour is mapped through it, so 255,255,255 above means white.")),
             urwid.Divider(),
+            urwid.Padding(attrmap(ActionButton("Apply settings", on_press=self._apply_settings, user_data=index)), width=20),
             urwid.Padding(attrmap(ActionButton("Preview on LED", on_press=self._preview, user_data=index)), width=20),
             urwid.Padding(attrmap(ActionButton("Back", on_press=self.main)), width=8),
         ]
@@ -858,7 +861,8 @@ class LEDTab(object):
     def _refresh_settings(self, *args):
         self.current_config = self._get_led_config()
 
-    def _apply_settings(self, *args):
+    def _apply_settings(self, _button=None, index=None):
+        """Apply every LED; from an LED's own screen, stay on that screen afterwards."""
         for led in self.current_config:
             for value in led["color"]:
                 validate_value(value, "int", 0, 255, None)
@@ -878,7 +882,8 @@ class LEDTab(object):
 
         self.current_config = self._get_led_config()
         confirmation_dialog(
-            "Settings successfully updated", single_option=True, next=self.main
+            "Settings successfully updated", single_option=True,
+            next=self.main if index is None else (lambda *_a: self.configure_led(None, index)),
         )
 
     def _list_functions(self, button, led_index):
@@ -890,6 +895,7 @@ class LEDTab(object):
         for choice in self.LED_FUNCTIONS_OPTIONS:
             button = urwid.RadioButton(self.bgroup, readable(choice))
             body.append(attrmap(button))
+            body.append(urwid.Padding(urwid.Text(("muted", LED_FUNCTIONS_INFO.get(choice, ""))), left=6))
         self.bgroup[
             self.LED_FUNCTIONS_OPTIONS.index(self.current_config[led_index]["function"])
         ].toggle_state()
@@ -1004,6 +1010,7 @@ class ButtonsTab(object):
             )
         elements += [
             urwid.Divider(),
+            urwid.Padding(attrmap(ActionButton("Apply settings", on_press=self._apply_settings, user_data=sw_id)), width=20),
             urwid.Padding(attrmap(ActionButton("Back", on_press=self.main)), width=8),
         ]
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
@@ -1046,6 +1053,7 @@ class ButtonsTab(object):
             urwid.Text(("muted", function_description(function, loadPiJuiceConfig()))),
             paramline,
             urwid.Divider(),
+            urwid.Padding(attrmap(ActionButton("Apply settings", on_press=self._apply_settings, user_data=data)), width=20),
             back_btn,
         ]
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
@@ -1105,15 +1113,21 @@ class ButtonsTab(object):
     def _get_device_config(self):
         return {button: service.get_button_config(button) for button in self.BUTTONS}
 
-    def _apply_settings(self, *args):
+    def _apply_settings(self, _button=None, where=None):
+        """Apply every button; from a button's screen (*where* = sw_id or
+        {sw_id, action}) stay on that screen afterwards."""
         for button in self.BUTTONS:
             service.set_button_config(button, self.current_config[button])
         self.device_config = self._get_device_config()
         self.current_config = copy.deepcopy(self.device_config)
         service.retry_notify()  # the daemon caches button functions until SIGHUP
-        confirmation_dialog(
-            "Settings have been applied", next=self.main, single_option=True
-        )
+        if isinstance(where, dict):
+            after = lambda *_a: self.configure_action(None, where)
+        elif where:
+            after = lambda *_a: self.configure_sw(None, where)
+        else:
+            after = self.main
+        confirmation_dialog("Settings have been applied", next=after, single_option=True)
 
 
 class IOTab(object):

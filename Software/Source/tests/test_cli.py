@@ -153,6 +153,17 @@ class CliTests(unittest.TestCase):
         saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
         self.assertEqual(saved['led_white'], {'D1': [255, 255, 255], 'D2': [60, 100, 60]})
         self.assertEqual(self.config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 60, 'g': 25, 'b': 0})
+        cli._active_tab.configure_led(None, 1)                     # Apply from the LED's own screen stays there
+        with patch.object(pijuice_service, 'notify_service', return_value=0):
+            self.click('Apply settings')
+        self.assertEqual(cli._screen_title(), 'LED D2')
+        self.assertEqual(self.config.SetLedConfiguration.call_count, 4)
+        cli.main_menu()
+        cli.item_chosen('Buttons')
+        cli._active_tab.configure_sw(None, 'SW2')
+        self.click('Apply settings')
+        self.assertEqual(cli._screen_title(), 'Button SW2')
+        self.assertEqual(self.config.SetButtonConfiguration.call_count, 3)
         cli.main_menu()
 
     def test_nested_back_and_menu_preserve_led_draft(self):

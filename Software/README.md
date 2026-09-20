@@ -194,7 +194,18 @@ On narrow windows, use the back arrow to return to the section list.
   the channels until one drops out, then balance the other two. Stored as
   `led_white` in the config; the firmware never sees it. Colours can be typed
   as hex (`#rrggbb`) in the CLI or picked from a colour dialog in the GTK app;
-  on a truecolor or 256-colour terminal the CLI shows a swatch.
+  on a truecolor or 256-colour terminal the CLI shows a swatch. **Apply** is
+  available on the LED's own screen (and on a button's screen in Buttons).
+- **LED functions** (the apps show these next to the choice):
+  *Charge status*: the firmware drives the LED from the charge level: above
+  50 % green (the G value), 15–50 % red + green, below 15 % red (R); blue (B)
+  blinks while charging and stays on when full; dimmed in low-power mode.
+  *Custom colour*: the LED shows the configured colour until a script changes
+  it. Only this function accepts `SetLedState` / `SetLedBlink`, so a script
+  that drives the LED needs it; set the colour to 0, 0, 0 if the LED should
+  stay off until the script lights it. Scripts send raw values; to go through
+  the white point use `PiJuiceService().set_led_state('D2', [r, g, b])` from
+  `pijuice_service` instead of `pijuice.status.SetLedState`.
 - Firmware updates show a busy indicator and prevent closing during the write.
   Power is checked again immediately before flashing. Failed updates offer retry.
 - If settings were saved but the daemon could not reload them, use **Retry
