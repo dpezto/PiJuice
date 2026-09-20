@@ -24,7 +24,7 @@ import datetime
 import os
 import re
 import sys
-
+import time
 
 import gi
 
@@ -38,6 +38,11 @@ from pijuice_service import (  # noqa: E402
     LED_USER_SELECTABLE,
     PiJuiceError,
     PiJuiceService,
+    alarm_fields,
+    pack_version,
+    readable,
+    schedule_values,
+    rtc_fields_now,
 )
 
 APP_ID = "org.pisupply.PiJuice"
@@ -126,9 +131,6 @@ class _View(Adw.PreferencesPage):
     """Base page: the service, the thread-marshalling helper, and the shared
     Adwaita row builders that used to be copy-pasted into every tab."""
 
-    title = "View"
-    slug = "view"
-
     def __init__(self, service):
         super().__init__()
         self.service = service
@@ -143,6 +145,7 @@ class _View(Adw.PreferencesPage):
         self._baseline = {}
         self._tracked = set()
         self._actions = None
+        self._dialog = None
         self._status_added = False
         self._built_available = service.available
         GLib.idle_add(self._capture)
@@ -169,11 +172,11 @@ class _View(Adw.PreferencesPage):
 
     @property
     def dirty(self):
-        return any(w.get_property(prop) != value
-                   for (w, prop), value in self._baseline.items()
-                   if w.get_root() == self.get_root())
+        return any(w.get_property(prop) != value for (w, prop), value in self._baseline.items())
 
     def _capture(self):
+        root = self.get_root()
+        self._tracked = {w for w in self._tracked if w.get_root() == root}
         if self._disposed:
             return False
         self._baseline = {(w, prop): w.get_property(prop)
@@ -289,6 +292,8 @@ class _View(Adw.PreferencesPage):
         return value
 
     def confirm(self, heading, body, callback):
+        if self._dialog is not None:
+            return  # one question at a time; a second click must not queue a second action
         dialog = Adw.MessageDialog(transient_for=self.get_root(), modal=True,
                                    heading=heading, body=body)
         dialog.add_response("cancel", "Cancel")
@@ -296,19 +301,27 @@ class _View(Adw.PreferencesPage):
         dialog.set_response_appearance("confirm", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_close_response("cancel")
         dialog.set_default_response("cancel")
-        dialog.connect("response", lambda d, r: callback() if r == "confirm" else None)
+        def response(_dialog, answer):
+            self._dialog = None
+            if answer == "confirm":
+                callback()
+        dialog.connect("response", response)
+        self._dialog = dialog
         dialog.present()
 
-    def immediate(self, switch, setter, message):
+    def immediate(self, switch, setter, message, after=None):
+        """A switch that writes on toggle (no Apply). *after(result)* runs on success."""
         switch._immediate = True
         def changed(_switch, state):
             if self._loading:
                 return False
             old = switch.get_state()
-            def done(_result):
+            def done(result):
                 switch.set_active(state)
                 switch.set_state(state)
-                self.flash(message)
+                if after:
+                    after(result)
+                self.flash(message(state) if callable(message) else message)
             def failed(exc):
                 self._loading = True
                 switch.set_active(old)
@@ -331,13 +344,6 @@ class _View(Adw.PreferencesPage):
         self.flash("Saved." if rc == 0 else
                    "Saved, but the background service did not reload. Use Retry service reload.")
         self._retry_notify.set_visible(rc != 0)
-
-    @staticmethod
-    def _int(entry, default):
-        try:
-            return int(entry.get_text())
-        except ValueError:
-            return default
 
     # --- Adwaita row builders ------------------------------------------------
     def add_group(self, title=None, description=None):
@@ -382,7 +388,7 @@ class _View(Adw.PreferencesPage):
                 self._applying = True
                 try:
                     apply_cb(_btn)
-                except (ValueError, PiJuiceError, OSError) as exc:
+                except Exception as exc:  # any failure keeps the draft and tells the user
                     self.flash(str(exc))
                 finally:
                     self._applying = False
@@ -392,13 +398,7 @@ class _View(Adw.PreferencesPage):
             box.append(actions)
         group.set_header_suffix(box)
 
-    @staticmethod
-    def readable(value):
-        aliases = {"NO_FUNC": "No action", "NOT_USED": "Not used", "USER_LED": "Custom colour",
-                   "CHARGE_STATUS": "Charge status", "ON_OFF_STATUS": "Power status",
-                   "NOT_PRESENT": "Not connected", "PRESENT": "Connected",
-                   "CHARGING_FROM_IN": "Charging via USB", "CHARGING_FROM_5V_IO": "Charging via GPIO"}
-        return aliases.get(value, value.replace("_", " ").capitalize() if "_" in value else value)
+    readable = staticmethod(readable)
 
     def combo_row(self, group, title, strings, subtitle=None):
         row = Adw.ComboRow(title=title, model=Gtk.StringList.new([self.readable(x) for x in strings]))
@@ -484,6 +484,7 @@ class StatusView(_View):
         self._switch = self.combo_row(
             switch_group, "Switch state", ["Off", "500 mA", "2100 mA"]
         )
+        self._switch._immediate = True  # applied by its own Set button, never a draft
         set_btn = Gtk.Button(label="Set")
         set_btn.add_css_class("suggested-action")
         set_btn.connect("clicked", self._on_set_switch)
@@ -498,11 +499,9 @@ class StatusView(_View):
 
     def _tick(self):
         self.refresh()
-        return True  # keep the timer running
 
     def refresh(self):
-        if not self._pending:
-            self.run_async(self._read, self._apply, live=True)
+        self.run_async(self._read, self._apply, live=True)
 
     def _read(self):
         """Best-effort read of all status fields (runs on the worker)."""
@@ -675,7 +674,6 @@ class LedView(_View):
         rgb = [row[ch].get_value_as_int() for ch in ("r", "g", "b")]
         # Preview is transient and restores the actual saved configuration.
         def work():
-            import time
             saved = self.service.get_led_config(led)
             try:
                 self.service.set_led_config(led, {
@@ -982,17 +980,16 @@ class BatteryView(_View):
     def __init__(self, service):
         super().__init__(service)
         self.add_group("Battery")  # placeholder header for the no-device message
-        if not service.available:
-            self.flash("No PiJuice detected.")
-            self.add_status()
+        if not self.require_device():
             return
 
         self._policy = service.get_charge_policy()
         care = self.add_group("Battery care", "The charge limit runs while the Pi and PiJuice service are running. It pauses at 80% and resumes at 75%; it does not discharge the battery to 80%.")
         _, self._limit = self.switch_row(care, "80% charge limit", "Changes immediately; leave off for maximum backup runtime")
-        self._limit._immediate = True
         self._limit.set_active(self._policy["enabled"])
-        self._limit.connect("state-set", self._set_limit)
+        self.immediate(self._limit, self._set_limit,
+                       lambda state: "80% charge limit " + ("enabled. The service checks every 5 seconds." if state else "disabled."),
+                       after=self._limit_saved)
         health = self.add_group("Battery condition", "Configured capacity describes the selected profile, not measured remaining capacity.")
         self._condition = self.value_row(health, "Condition")
         self._temperature = self.value_row(health, "Temperature")
@@ -1029,30 +1026,18 @@ class BatteryView(_View):
         self.refresh()
         self.poll(5, self._refresh_health)
 
-    def _set_limit(self, switch, state):
-        if self._loading:
-            return False
-        previous = switch.get_state()
-        policy = {"enabled": state, "limit": 80, "resume": 75}
-        def done(rc):
-            self._policy = policy
-            switch.set_active(state)
-            switch.set_state(state)
-            self._charging.set_sensitive(not state)
-            self._saved(rc)
-            if rc == 0:
-                self.flash("80% charge limit " + ("enabled. The service checks every 5 seconds." if state else "disabled."))
-        def failed(exc):
-            self._loading = True
-            switch.set_active(previous)
-            switch.set_state(previous)
-            self._loading = False
-            self.flash("Could not save charge limit: %s" % exc)
-        self.run_async(lambda: self.service.set_charge_policy(policy), done, failed, write=True, preserve=True)
-        return True
+    def _set_limit(self, state):
+        return self.service.set_charge_policy({"enabled": state, "limit": 80, "resume": 75})
+
+    def _limit_saved(self, rc):
+        self._policy = self.service.get_charge_policy()
+        self._charging.set_sensitive(not self._policy["enabled"])
+        self._saved(rc)
 
     def _refresh_health(self):
-        self.run_async(self.service.get_battery_report, self._show_health, live=True)
+        if self.service.available:  # a lost HAT must not toast every 5 s
+            self.run_async(self.service.get_battery_report, self._show_health, live=True,
+                           on_error=lambda exc: self._condition.set_text("Unavailable: %s" % exc))
 
     def _show_health(self, report):
         if isinstance(report.get("policy"), dict):
@@ -1062,7 +1047,7 @@ class BatteryView(_View):
         if isinstance(report.get("charging"), dict):
             self._charging.set_active(report["charging"].get("charging_enabled", False))
         self._health_note.set_text(report.get("health", "Battery history: waiting for readings."))
-        self._condition.set_text(report["condition"])
+        self._condition.set_text(report.get("condition", ""))
         temperature = report.get("temperature")
         self._temperature.set_text("Unavailable" if temperature is None else "%s °C" % temperature)
         capacity = report.get("design_capacity")
@@ -1148,9 +1133,7 @@ class IoView(_View):
     def __init__(self, service):
         super().__init__(service)
         head = self.add_group("IO")
-        if not service.available:
-            self.flash("No PiJuice detected.")
-            self.add_status()
+        if not self.require_device():
             return
         self.set_actions(head, self._on_apply, self.refresh)
 
@@ -1262,9 +1245,7 @@ class WakeupView(_View):
     def __init__(self, service):
         super().__init__(service)
         head = self.add_group("Wakeup Alarm", "Schedules use UTC and do not shift with daylight saving time.")
-        if not service.available:
-            self.flash("No PiJuice detected.")
-            self.add_status()
+        if not self.require_device():
             return
 
         self.set_actions(head, self._on_set_alarm, self.refresh, "Apply schedule")
@@ -1335,7 +1316,6 @@ class WakeupView(_View):
             self.service.get_rtc_time, self._show_time,
             on_error=lambda _e: (self._time.set_text("Unavailable"), self._local_time.set_text("Unavailable")), live=True
         )
-        return True
 
     def _show_time(self, t):
         try:
@@ -1359,74 +1339,32 @@ class WakeupView(_View):
     def _apply_alarm(self, data):
         ctrl = data.get("control") or {}
         self._enabled.set_active(bool(ctrl.get("alarm_wakeup_enabled")))
-        a = data.get("alarm") or {}
-        self._every_day.set_active(False)
-        self._every_hour.set_active(False)
-        self._mintype.set_selected(0)
-        if "weekday" in a:
-            self._daytype.set_selected(1)
-            self._set_day(a["weekday"])
-        elif "day" in a:
-            self._daytype.set_selected(0)
-            self._set_day(a["day"])
-        if a.get("hour") == "EVERY_HOUR":
-            self._every_hour.set_active(True)
-        elif "hour" in a:
-            self._hour.set_text(str(a["hour"]))
-        if "minute_period" in a:
-            self._mintype.set_selected(1)
-            self._minute.set_text(str(a["minute_period"]))
-        elif "minute" in a:
-            self._mintype.set_selected(0)
-            self._minute.set_text(str(a["minute"]))
-        if "second" in a:
-            self._second.set_text(str(a["second"]))
-
-    def _set_day(self, value):
-        if value == "EVERY_DAY":
-            self._every_day.set_active(True)
-        else:
-            self._day.set_text(str(value))
+        f = alarm_fields(data.get("alarm"))  # every field reset, so no stale draft text survives
+        self._daytype.set_selected(f["day_type"])
+        self._every_day.set_active(f["every_day"])
+        self._day.set_text(f["day"])
+        self._every_hour.set_active(f["every_hour"])
+        self._hour.set_text(f["hour"])
+        self._mintype.set_selected(f["minute_type"])
+        self._minute.set_text(f["minute"])
+        self._second.set_text(f["second"] or "0")
 
     def _on_set_time(self, _btn):
-        now = datetime.datetime.now(datetime.timezone.utc)
-        fields = {
-            "second": now.second,
-            "minute": now.minute,
-            "hour": now.hour,
-            "weekday": (now.weekday() + 1) % 7 + 1,
-            "day": now.day,
-            "month": now.month,
-            "year": now.year,
-            "subsecond": 0,
-        }
         self.run_async(
-            lambda: self.service.set_rtc_time(fields),
+            lambda: self.service.set_rtc_time(rtc_fields_now()),
             lambda _r: (self.flash("RTC time set."), self._tick()),
             write=True, preserve=True,
         )
 
     def _schedule_values(self, entry, label, lo, hi, hours=False):
-        values = []
         try:
-            for item in entry.get_text().upper().split(";"):
-                item = item.strip()
-                if hours and (item.endswith("AM") or item.endswith("PM")):
-                    hour = int(item[:-2].strip())
-                    if not 1 <= hour <= 12:
-                        raise ValueError()
-                    value = hour % 12 + (12 if item.endswith("PM") else 0)
-                else:
-                    value = int(item)
-                if not lo <= value <= hi:
-                    raise ValueError()
-                values.append(value)
+            value = schedule_values(entry.get_text(), lo, hi, hours)
         except ValueError:
             entry.add_css_class("error")
             entry.grab_focus()
             raise ValueError("%s must be between %s and %s; separate multiple values with semicolons." % (label, lo, hi))
         entry.remove_css_class("error")
-        return values[0] if len(values) == 1 else ";".join(str(v) for v in sorted(set(values)))
+        return value
 
     def _on_set_alarm(self, _btn):
         alarm = {"second": self.number(self._second, "Second", 0, 59)}
@@ -1504,7 +1442,7 @@ class FirmwareView(_View):
             m = self._RE.match(name)
             if not m:
                 continue
-            ver = (int(m.group(1)) << 4) + int(m.group(2))
+            ver = pack_version("%s.%s" % m.group(1, 2))
             if ver >= best:
                 best = ver
                 self._new_ver = "%d.%d" % (int(m.group(1)), int(m.group(2)))
@@ -1522,21 +1460,11 @@ class FirmwareView(_View):
         self._update_btn.set_sensitive(False)
         cur = (fw or {}).get("version") if isinstance(fw, dict) else None
         self._ver.set_text(cur or "unknown")
-        cur_int = None
-        if cur:
-            try:
-                major, minor = cur.split(".")
-                cur_int = (int(major) << 4) + int(minor)
-            except ValueError:
-                cur_int = None
-        new_int = None
-        if self._new_ver:
-            major, minor = self._new_ver.split(".")
-            new_int = (int(major) << 4) + int(minor)
-        if cur_int is not None and new_int is not None and new_int > cur_int:
+        cur_int, new_int = pack_version(cur), pack_version(self._new_ver)
+        if cur_int and new_int > cur_int:
             self._fw_status.set_text("New firmware V%s available." % self._new_ver)
             self._update_btn.set_sensitive(True)
-        elif cur_int is not None and new_int is not None:
+        elif cur_int and new_int:
             self._fw_status.set_text("Firmware is up to date.")
         else:
             self._fw_status.set_text("No applicable update found.")
@@ -1561,7 +1489,7 @@ class FirmwareView(_View):
                     "Charge level too low to update (connect power or charge to at least 20%)."
                 )
 
-        self.run_async(check, done, write=True)
+        self.run_async(check, done, live=True)
 
     def _do_flash(self, _btn):
         if not self._bin_file or self._writing:
@@ -1578,7 +1506,11 @@ class FirmwareView(_View):
             rc = self.service.flash_firmware(self._bin_file)
             if rc:
                 raise PiJuiceError("Firmware update failed (code %s)" % rc)
-            return self.service.connect()
+            for _ in range(60):  # ponytail: bounded 30 s; the HAT reboots in a few
+                time.sleep(0.5)
+                if self.service.connect():
+                    return True
+            return False
         def failed(exc):
             self._spinner.stop()
             self._update_btn.set_sensitive(True)
@@ -1721,7 +1653,7 @@ class PiJuiceWindow(Adw.ApplicationWindow):
     def _on_close(self, *_args):
         views = self._views()
         if any(v._writing for v in views):
-            self._connection.set_text("Wait for the current operation to finish before closing.")
+            views[0].flash("Wait for the current operation to finish before closing.")
             return True
         if any(v.dirty for v in views):
             views[0].confirm("Discard unsaved changes?", "Your saved settings will be kept.", self._close_now)

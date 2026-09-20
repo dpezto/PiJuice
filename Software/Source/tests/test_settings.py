@@ -81,6 +81,7 @@ class FakeService(PiJuiceService):
     def get_battery_temp_sense(self): return self.battery_temp_sense_options[0]
     def get_rsoc_estimation(self): return self.rsoc_estimation_options[0]
     def get_charging_config(self): return {'charging_enabled': self.charging}
+    def set_system_power_switch(self, value): self.write('switch', value)
     def set_charging_config(self, state):
         self.write('charging', state)
         self.charging = state
@@ -316,6 +317,18 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(view.dirty)
         saved = json.loads(Path(self.service.config_path).read_text())
         self.assertEqual(saved['battery_management'], {'enabled': True, 'limit': 80, 'resume': 75})
+
+    def test_status_switch_choice_is_not_a_draft_and_dialogs_do_not_stack(self):
+        from pijuice_gtk import StatusView
+        view = self.view(StatusView)
+        view._switch.set_selected(0)
+        self.assertFalse(view.dirty)
+        view._on_set_switch(None)
+        view._on_set_switch(None)
+        self.assertIsNotNone(view._dialog)
+        view._dialog.emit('response', 'cancel')
+        self.assertIsNone(view._dialog)
+        self.assertEqual([c for c in self.service.calls if c[0] == 'switch'], [])
 
     def test_atomic_save_failure_preserves_file_and_memory(self):
         self.service.save_section('system_task', {'enabled': False})
