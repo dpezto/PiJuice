@@ -120,7 +120,7 @@ class CliTests(unittest.TestCase):
         cli.item_chosen('LEDs')
         tab = cli._active_tab
         tab.configure_led(None,0)
-        edit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w,urwid.Edit))
+        edit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w,urwid.Edit) and w.caption == 'R: ')
         edit.set_edit_text('999')
         cli.apply_draft()
         self.config.SetLedConfiguration.assert_not_called()
@@ -131,27 +131,35 @@ class CliTests(unittest.TestCase):
         cli.apply_draft()
         self.assertEqual(self.config.SetLedConfiguration.call_count,2)
 
-    def test_led_limit_is_saved_and_colours_scaled(self):
+    def test_led_white_point_hex_and_swatch(self):
         cli.item_chosen('LEDs')
         cli._active_tab.configure_led(None, 1)
-        limit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w, urwid.Edit) and 'limit' in w.caption)
-        limit.set_edit_text('999')
+        edits = {w.caption.strip(': '): w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w, urwid.Edit)}
+        self.assertEqual(edits['Hex'].edit_text, '#0a141e')
+        edits['Hex'].set_edit_text('#ff8000')                       # hex drives the channels
+        self.assertEqual([edits[c].edit_text for c in 'RGB'], ['255', '128', '0'])
+        edits['G'].set_edit_text('64')                              # and the channels drive the hex
+        self.assertEqual(edits['Hex'].edit_text, '#ff4000')
+        cli._screen_colors = 2 ** 24
+        cli._active_tab._paint_swatch([255, 64, 0])
+        self.assertEqual(cli.loop.screen.register_palette_entry.call_args.args[-1], '#ff4000')
+        edits['White point R,G,B'].set_edit_text('60,999,60')
         cli.apply_draft()
         self.config.SetLedConfiguration.assert_not_called()
-        limit.set_edit_text('50')
+        edits['White point R,G,B'].set_edit_text('60,100,60')
         with patch.object(pijuice_service, 'notify_service', return_value=0):
             cli.go_back()
             cli.apply_draft()
         saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
-        self.assertEqual(saved['led_limits'], {'D1': 100, 'D2': 50})
-        self.assertEqual(self.config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 5, 'g': 10, 'b': 15})
+        self.assertEqual(saved['led_white'], {'D1': [255, 255, 255], 'D2': [60, 100, 60]})
+        self.assertEqual(self.config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 60, 'g': 25, 'b': 0})
         cli.main_menu()
 
     def test_nested_back_and_menu_preserve_led_draft(self):
         cli.item_chosen('LEDs')
         tab = cli._active_tab
         tab.configure_led(None,0)
-        edit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w,urwid.Edit))
+        edit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w,urwid.Edit) and w.caption == 'R: ')
         edit.set_edit_text('99')
         cli.go_back()
         self.assertTrue(cli._dirty)

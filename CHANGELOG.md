@@ -106,9 +106,12 @@ pijuice-base; urgency=low
     - The window is sized to its content (raspi-config style, up to 78
       columns) instead of filling the terminal
 
-* LEDs: a per-LED brightness limit (10–100 %) in both apps. The RGB diodes
-  share one current budget, so a bright white dropped a channel; colours are
-  scaled to the limit before they reach the firmware and scaled back on read
+* LEDs: a per-LED white point (raw R G B that shows white, e.g. 60/100/60) in
+  both apps. The RGB diodes share one current budget and differ in efficiency,
+  so a bright white dropped a channel; colours are mapped through the white
+  point before they reach the firmware and mapped back on read. Hex input and
+  a truecolor swatch in the CLI, a colour picker in the GTK app, Preview on the
+  LED in both
 
 * Cosmetics, both apps:
     - Button and event functions are shown by what they do ("Power on",

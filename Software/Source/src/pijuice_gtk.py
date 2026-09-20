@@ -30,7 +30,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from pijuice_battery import profile_label
 
@@ -637,37 +637,62 @@ class LedView(_View):
     def _build_led_group(self, led):
         group = self.add_group(led)
         func = self.combo_row(group, "Function", LED_USER_SELECTABLE)
+        colour_row = Adw.ActionRow(title="Colour", subtitle="Pick, or set the channels below")
+        picker = Gtk.ColorButton(valign=_CENTER, use_alpha=False, title="LED colour")
+        colour_row.add_suffix(picker)
+        colour_row.set_activatable_widget(picker)
+        group.add(colour_row)
         r = self.spin_row(group, "Red", 0, 255)[1]
         g = self.spin_row(group, "Green", 0, 255)[1]
         b = self.spin_row(group, "Blue", 0, 255)[1]
-        limit = self.spin_row(group, "Brightness limit (%)", 10, 100, value=100)[1]
-        limit.set_tooltip_text("The three channels share one current budget, so a bright white loses "
-                               "a channel. Colours are scaled to this before they are written; "
-                               "lower it until white shows all three.")
+        white_row = Adw.ActionRow(title="White point", subtitle="Raw R G B at which this LED shows white; 255 255 255 = uncalibrated")
+        white_row.set_tooltip_text("The three diodes share one current budget and differ in efficiency, so "
+                                   "white is not 255/255/255 (one board needs 60/100/60). Every colour is "
+                                   "mapped through this point, so the colour above means what it says.")
+        box = Gtk.Box(orientation=_H, spacing=4, valign=_CENTER)
+        white = []
+        for name in ("R", "G", "B"):
+            adj = Gtk.Adjustment(lower=1, upper=255, step_increment=1, page_increment=10)
+            spin = Gtk.SpinButton(adjustment=adj, numeric=True, valign=_CENTER, width_chars=3)
+            spin.set_value(255)
+            spin.update_property([Gtk.AccessibleProperty.LABEL], ["White point " + name])
+            box.append(spin)
+            white.append(spin)
+        white_row.add_suffix(box)
+        group.add(white_row)
         test = Gtk.Button(label="Preview colour")
         test.add_css_class("flat")
         test.connect("clicked", self._on_test, led)
         group.set_header_suffix(test)
-        self._rows[led] = {"function": func, "r": r, "g": g, "b": b, "limit": limit}
+        self._rows[led] = {"function": func, "r": r, "g": g, "b": b, "white": white, "picker": picker}
         def custom_colour(_spin):
+            rgba = Gdk.RGBA()
+            rgba.red, rgba.green, rgba.blue, rgba.alpha = r.get_value() / 255, g.get_value() / 255, b.get_value() / 255, 1.0
+            picker.set_rgba(rgba)
             if not self._loading:
                 self.combo_set(func, "USER_LED", LED_USER_SELECTABLE)
         for spin in (r, g, b):
             spin.connect("value-changed", custom_colour)
+        def picked(_btn):
+            rgba = picker.get_rgba()
+            for spin, value in ((r, rgba.red), (g, rgba.green), (b, rgba.blue)):
+                spin.set_value(round(value * 255))
+        picker.connect("color-set", picked)
 
     def refresh(self):
         for led in self._rows:
             self.run_async(
-                lambda led=led: (led, self.service.get_led_config(led), self.service.get_led_limit(led)),
+                lambda led=led: (led, self.service.get_led_config(led), self.service.get_led_white(led)),
                 self._apply_one,
             )
 
     def _apply_one(self, triple):
-        led, cfg, limit = triple
+        led, cfg, white = triple
         row = self._rows.get(led)
         if not row or not cfg:
             return
-        row["limit"].set_value(limit)
+        for spin, value in zip(row["white"], white):
+            spin.set_value(value)
         self.combo_set(row["function"], cfg.get("function", "NOT_USED"), LED_USER_SELECTABLE)
         param = cfg.get("parameter", {})
         for ch in ("r", "g", "b"):
@@ -685,10 +710,10 @@ class LedView(_View):
         }
 
     def _on_apply(self, _btn):
-        configs = [(led, self._row_config(led), self._rows[led]["limit"].get_value_as_int()) for led in self._rows]
+        configs = [(led, self._row_config(led), [s.get_value_as_int() for s in self._rows[led]["white"]]) for led in self._rows]
         def work():
-            for led, cfg, limit in configs:
-                self.service.set_led_limit(led, limit)
+            for led, cfg, white in configs:
+                self.service.set_led_white(led, white)
                 self.service.set_led_config(led, cfg)
         self.run_async(work, lambda _r: self.flash("LED settings applied."), write=True)
 

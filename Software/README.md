@@ -184,13 +184,17 @@ On narrow windows, use the back arrow to return to the section list.
   wakeup-on-charge.
 - **Preview colour** briefly displays the chosen LED colour and restores the
   saved configuration. **Apply** saves the new LED settings.
-- **Brightness limit** (per LED, both apps): the three diodes of an RGB LED
-  share one current budget, so a bright white loses a channel (blue, with the
-  highest forward voltage, starves first; the firmware's own default charge
-  colour is 60/60/100). The limit scales every colour you set before it is
-  written and scales it back on read, ratio kept, so 255/255/255 stays white.
-  Find it by trial: lower the limit until white shows all three channels.
-  Stored as `led_limits` in the config; the firmware never sees it.
+- **White point** (per LED, both apps): the three diodes of an RGB LED share
+  one current budget and differ in efficiency, so the raw values that look
+  white are not 255/255/255 (one board needs 60/100/60; the firmware's own
+  default charge colour is 60/60/100). Enter the raw R, G, B at which your LED
+  shows white; every colour you set is mapped through that point before it is
+  written and mapped back on read, so 255/255/255 in the app means white on
+  the LED and hues keep their ratio. Find it by trial with **Preview**: raise
+  the channels until one drops out, then balance the other two. Stored as
+  `led_white` in the config; the firmware never sees it. Colours can be typed
+  as hex (`#rrggbb`) in the CLI or picked from a colour dialog in the GTK app;
+  on a truecolor or 256-colour terminal the CLI shows a swatch.
 - Firmware updates show a busy indicator and prevent closing during the write.
   Power is checked again immediately before flashing. Failed updates offer retry.
 - If settings were saved but the daemon could not reload them, use **Retry

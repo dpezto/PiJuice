@@ -692,6 +692,35 @@ class GeneralTab(object):
         )
 
 
+def _rgb_to_hex(color):
+    return "#%02x%02x%02x" % tuple(int(v) for v in color)
+
+
+def _hex_to_rgb(text):
+    text = text.strip().lstrip("#")
+    if len(text) != 6 or any(c not in "0123456789abcdefABCDEF" for c in text):
+        return None
+    return [int(text[i:i + 2], 16) for i in (0, 2, 4)]
+
+
+_screen_colors = 16  # set from the terminal in _build_and_run
+
+
+def _swatch_colors():
+    return _screen_colors if _screen_colors >= 256 else 0
+
+
+def _swatch_spec(color):
+    """urwid background spec for a colour swatch: 24-bit when the terminal has it,
+    the nearest 256-colour cube entry otherwise, none on 16-colour terminals."""
+    r, g, b = (int(v) for v in color)
+    if _screen_colors >= 2 ** 24:
+        return "#%02x%02x%02x" % (r, g, b)
+    if _screen_colors >= 256:
+        return "#%x%x%x" % (r * 15 // 255, g * 15 // 255, b * 15 // 255)
+    return None
+
+
 class LEDTab(object):
     LED_FUNCTIONS_OPTIONS = PiJuiceConfig.ledFunctionsOptions
     LED_NAMES = PiJuiceConfig.leds
@@ -735,6 +764,11 @@ class LEDTab(object):
             user_data=index,
         )
         elements.append(urwid.Padding(attrmap(self._function_button), width=30))
+        self._syncing = False
+        self._swatch = urwid.Text(("swatch", "        "))
+        self._hex_edit = urwid.Edit("Hex: ", edit_text=_rgb_to_hex(self.current_config[index]["color"]))
+        urwid.connect_signal(self._hex_edit, "change", self._set_hex, user_args=[index])
+        self._color_edits = []
         for color in colors:
             color_edit = urwid.Edit(
                 color + ": ",
@@ -746,20 +780,71 @@ class LEDTab(object):
                 self._set_color,
                 user_args=[{"color_index": colors.index(color), "led_index": index}],
             )
-            elements.append(attrmap(color_edit))
-        limit_edit = urwid.Edit("Brightness limit [%]: ", edit_text=str(self.current_config[index]["limit"]))
-        urwid.connect_signal(limit_edit, "change", self._set_limit, user_args=[index])
+            self._color_edits.append(color_edit)
+        swatch_row = urwid.Columns([(28, attrmap(self._hex_edit)), (8, self._swatch)], dividechars=2)
+        elements.append(swatch_row if _swatch_colors() else attrmap(self._hex_edit))
+        elements += [attrmap(e) for e in self._color_edits]
+        self._paint_swatch(self.current_config[index]["color"])
+        white_edit = urwid.Edit("White point R,G,B: ", edit_text=",".join(str(v) for v in self.current_config[index]["white"]))
+        urwid.connect_signal(white_edit, "change", self._set_white, user_args=[index])
         elements += [
             urwid.Divider(),
-            attrmap(limit_edit),
-            urwid.Text(("muted", "Keeps all three channels lit: the colour is scaled to this before it is written.")),
+            attrmap(white_edit),
+            urwid.Text(("muted", "The raw values at which this LED shows white (255,255,255 = uncalibrated). "
+                                 "Every colour is mapped through it, so 255,255,255 above means white.")),
             urwid.Divider(),
+            urwid.Padding(attrmap(ActionButton("Preview on LED", on_press=self._preview, user_data=index)), width=20),
             urwid.Padding(attrmap(ActionButton("Back", on_press=self.main)), width=8),
         ]
         main.original_widget = urwid.Filler(urwid.Pile(elements), valign="top")
 
-    def _set_limit(self, index, edit, text):
-        self.current_config[index]["limit"] = _validate_edit(edit, text, "int", 10, 100, self.LED_NAMES[index] + " limit")
+    def _paint_swatch(self, color):
+        spec = _swatch_spec(color)
+        if spec and loop is not None and hasattr(loop.screen, "register_palette_entry"):
+            loop.screen.register_palette_entry("swatch", "", "", None, "", spec)
+            self._swatch.set_text(("swatch", "        "))
+        elif self._swatch is not None:
+            self._swatch.set_text("")
+
+    def _set_hex(self, index, edit, text):
+        if self._syncing:
+            return
+        rgb = _hex_to_rgb(text)
+        if rgb is None:
+            _errors[self.LED_NAMES[index] + " hex"] = "Hex colour must be #RRGGBB."
+            return
+        _errors.pop(self.LED_NAMES[index] + " hex", None)
+        self._syncing = True
+        try:
+            for edit_widget, value in zip(self._color_edits, rgb):
+                edit_widget.set_edit_text(str(value))
+        finally:
+            self._syncing = False
+
+    def _set_white(self, index, edit, text):
+        key = self.LED_NAMES[index] + " white point"
+        try:
+            white = [validate_number(v, "int", 1, 255) for v in text.split(",")]
+            if len(white) != 3:
+                raise ValueError()
+        except ValueError:
+            _errors[key] = "%s: three values 1-255 separated by commas." % key
+            return
+        _errors.pop(key, None)
+        self.current_config[index]["white"] = white
+
+    def _preview(self, _button, index):
+        """Show the colour on the LED for a second, then restore what is saved."""
+        name = self.LED_NAMES[index]
+        rgb = [validate_number(v, "int", 0, 255) for v in self.current_config[index]["color"]]
+        saved = service.get_led_config(name)
+        try:
+            service.set_led_config(name, {"function": "USER_LED", "parameter": dict(zip("rgb", rgb))})
+            loop.draw_screen()
+            time.sleep(1)
+        finally:
+            service.set_led_config(name, saved)
+        _flash("Preview finished; saved LED settings restored.", "ok")
 
     def _get_led_config(self):
         config = []
@@ -767,7 +852,7 @@ class LEDTab(object):
             result = service.get_led_config(name)
             config.append({"function": result.get("function", self.LED_FUNCTIONS_OPTIONS[0]),
                            "color": [result["parameter"][c] for c in ("r", "g", "b")],
-                           "limit": service.get_led_limit(name)})
+                           "white": service.get_led_white(name)})
         return config
 
     def _refresh_settings(self, *args):
@@ -777,9 +862,10 @@ class LEDTab(object):
         for led in self.current_config:
             for value in led["color"]:
                 validate_value(value, "int", 0, 255, None)
-            validate_value(led["limit"], "int", 10, 100, None)
+            for value in led["white"]:
+                validate_value(value, "int", 1, 255, None)
         for i in range(len(self.LED_NAMES)):
-            service.set_led_limit(self.LED_NAMES[i], self.current_config[i]["limit"])
+            service.set_led_white(self.LED_NAMES[i], self.current_config[i]["white"])
             config = {
                 "function": self.current_config[i]["function"],
                 "parameter": {
@@ -838,6 +924,15 @@ class LEDTab(object):
         if self.current_config[led_index]["function"] != "USER_LED":
             self.current_config[led_index]["function"] = "USER_LED"
             self._function_button.set_label("Function: " + readable("USER_LED"))
+        color = self.current_config[led_index]["color"]
+        if all(str(v).isdigit() and int(v) <= 255 for v in color):
+            self._paint_swatch(color)
+            if not self._syncing:
+                self._syncing = True
+                try:
+                    self._hex_edit.set_edit_text(_rgb_to_hex(color))
+                finally:
+                    self._syncing = False
 
 
 
@@ -3525,6 +3620,8 @@ def _selftest():
     assert vim_translate(["x", "backspace"], "normal", True, False)[0] == [EDIT_X]
     assert _word_motion("/usr/local/bin/x.sh", 0, "w") == 1 and _word_motion("ab cd", 3, "b") == 0
     assert _word_motion("ab cd", 0, "e") == 1 and _word_motion("ab cd", 4, "w") == 5
+    assert _hex_to_rgb("#3C643c") == [60, 100, 60] and _rgb_to_hex([60, 100, 60]) == "#3c643c"
+    assert _hex_to_rgb("3c643") is None
     assert _is_menu_button(MenuButton("Buttons")) and not _is_menu_button(ActionButton("Apply settings"))
     out, m, p, ins = vim_translate(["g"], "normal", False, False)
     assert p is True and out == []
@@ -3634,6 +3731,14 @@ def _build_and_run():
                       if "NO_COLOR" in os.environ else PALETTE),
         input_filter=input_filter,
     )
+    global _screen_colors
+    if "NO_COLOR" not in os.environ:
+        if os.environ.get("COLORTERM") in ("truecolor", "24bit"):
+            _screen_colors = 2 ** 24
+        elif "256" in os.environ.get("TERM", ""):
+            _screen_colors = 256
+        if _screen_colors > 16:
+            loop.screen.set_terminal_properties(colors=_screen_colors)
     _render_header()
     loop.run()
 

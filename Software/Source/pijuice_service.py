@@ -141,21 +141,35 @@ def function_description(name, config=None):
     return ''
 
 
-def led_limit(config, led):
-    """Brightness limit (10-100 %) for *led* from the config's ``led_limits``."""
+def led_white(config, led):
+    """``[r, g, b]`` (1-255 each) the LED needs to show white, from ``led_white``.
+    255/255/255 means uncalibrated. An older ``led_limits`` percentage migrates."""
+    config = config or {}
+    raw = (config.get('led_white') or {}).get(led)
+    if raw is None:
+        try:
+            level = round(255 * int((config.get('led_limits') or {}).get(led, 100)) / 100)
+        except (TypeError, ValueError):
+            level = 255
+        raw = [level] * 3
     try:
-        return max(10, min(100, int((config or {}).get('led_limits', {}).get(led, 100))))
+        white = [max(1, min(255, int(v))) for v in raw]
+        return white if len(white) == 3 else [255, 255, 255]
     except (TypeError, ValueError):
-        return 100
+        return [255, 255, 255]
 
 
-def _scale_led(config, factor):
+def _scale_led(config, white, to_device):
+    """Map a colour between the user's 0-255 space and the device, per channel,
+    so that the user's 255/255/255 lands on the calibrated white point."""
     if not isinstance(config, dict) or not isinstance(config.get('parameter'), dict):
         return config
     parameter = {}
     for channel, value in config['parameter'].items():
+        point = white['rgb'.index(channel)] if channel in 'rgb' else 255
         try:
-            parameter[channel] = max(0, min(255, round(int(value) * factor)))
+            scaled = int(value) * (point / 255 if to_device else 255 / point)
+            parameter[channel] = max(0, min(255, round(scaled)))
         except (TypeError, ValueError):
             parameter[channel] = value
     return dict(config, parameter=parameter)
@@ -517,26 +531,29 @@ class PiJuiceService(object):
     def leds(self):
         return self._require().config.leds
 
-    # The three diodes of an RGB LED share one current budget; at high duty the
-    # blue one (highest forward voltage) starves first, so white turns yellow.
-    # A per-LED brightness limit scales every colour before it reaches the
-    # firmware and scales it back on read, so the UIs show what the user set.
-    def get_led_limit(self, led):
-        return led_limit(load_config(self.config_path), led)
+    # The three diodes of an RGB LED share one current budget and differ in
+    # efficiency, so the raw values that look white are not 255/255/255 (one
+    # board needed 60/100/60). The white point is the calibration: every colour
+    # is mapped through it before it reaches the firmware and mapped back on
+    # read, so the UIs show the colour the user meant.
+    def get_led_white(self, led):
+        return led_white(load_config(self.config_path), led)
 
-    def set_led_limit(self, led, percent):
-        limits = dict(load_config(self.config_path).get('led_limits') or {})
-        limits[led] = validate_number(percent, 'int', 10, 100)
-        return self.save_section('led_limits', limits)
+    def set_led_white(self, led, rgb):
+        if len(rgb) != 3:
+            raise ValueError('White point needs three values.')
+        whites = dict(load_config(self.config_path).get('led_white') or {})
+        whites[led] = [validate_number(v, 'int', 1, 255) for v in rgb]
+        return self.save_section('led_white', whites)
 
     def get_led_config(self, led):
         pj = self._require()
         config = _unwrap(pj.config.GetLedConfiguration(led), 'GetLedConfiguration')
-        return _scale_led(config, 100 / self.get_led_limit(led))
+        return _scale_led(config, self.get_led_white(led), to_device=False)
 
     def set_led_config(self, led, config):
         pj = self._require()
-        return _unwrap(pj.config.SetLedConfiguration(led, _scale_led(config, self.get_led_limit(led) / 100)),
+        return _unwrap(pj.config.SetLedConfiguration(led, _scale_led(config, self.get_led_white(led), to_device=True)),
                        'SetLedConfiguration')
 
     # ── battery domain ───────────────────────────────────────────────────────

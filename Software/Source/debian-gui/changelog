@@ -7,7 +7,8 @@ pijuice-gui (1.10) unstable; urgency=low
   * pijuice_tray: unused PID file removed.
   * Functions shown by what they do, with a description under each combo;
     user script slots can be named.
-  * LEDs: per-LED brightness limit so a bright white keeps all three channels.
+  * LEDs: per-LED white point calibration so a bright white keeps all three
+    channels; hex/colour-picker input and preview.
 
  -- Dai López <dpezto@gmail.com>  Sun, 20 Sep 2026 08:47:25 -0600
 

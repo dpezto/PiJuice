@@ -33,22 +33,23 @@ class ServiceTests(unittest.TestCase):
         self.assertIn('60 s', function_description('SYS_FUNC_HALT_POW_OFF'))
         self.assertIn('/x.sh', function_description('USER_FUNC2', {'user_functions': {'USER_FUNC2': '/x.sh'}}))
 
-    def test_led_brightness_limit_scales_writes_and_reads(self):
+    def test_led_white_point_maps_writes_and_reads(self):
         from unittest.mock import Mock
         config = Mock()
         config.SetLedConfiguration.return_value = {'error': 'NO_ERROR'}
-        config.GetLedConfiguration.return_value = {'error': 'NO_ERROR', 'data': {'function': 'USER_LED', 'parameter': {'r': 100, 'g': 100, 'b': 100}}}
+        config.GetLedConfiguration.return_value = {'error': 'NO_ERROR', 'data': {'function': 'USER_LED', 'parameter': {'r': 60, 'g': 100, 'b': 60}}}
         self.service.pj = SimpleNamespace(config=config)
         self.service.set_led_config('D2', {'function': 'USER_LED', 'parameter': {'r': 200, 'g': 200, 'b': 200}})
         self.assertEqual(config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 200, 'g': 200, 'b': 200})
         with patch.object(svc, 'notify_service', return_value=0):
-            self.service.set_led_limit('D2', 50)
-            with self.assertRaises(ValueError): self.service.set_led_limit('D2', 5)
-            with self.assertRaises(ValueError): self.service.set_led_limit('D2', 150)
-        self.service.set_led_config('D2', {'function': 'USER_LED', 'parameter': {'r': 200, 'g': 200, 'b': 200}})
-        self.assertEqual(config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 100, 'g': 100, 'b': 100})
-        self.assertEqual(self.service.get_led_config('D2')['parameter'], {'r': 200, 'g': 200, 'b': 200})
-        self.assertEqual(self.service.get_led_limit('D1'), 100)
+            self.service.set_led_white('D2', [60, 100, 60])
+            with self.assertRaises(ValueError): self.service.set_led_white('D2', [0, 100, 60])
+            with self.assertRaises(ValueError): self.service.set_led_white('D2', [60, 100])
+        self.service.set_led_config('D2', {'function': 'USER_LED', 'parameter': {'r': 255, 'g': 255, 'b': 255}})
+        self.assertEqual(config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 60, 'g': 100, 'b': 60})
+        self.assertEqual(self.service.get_led_config('D2')['parameter'], {'r': 255, 'g': 255, 'b': 255})
+        self.assertEqual(self.service.get_led_white('D1'), [255, 255, 255])
+        self.assertEqual(svc.led_white({'led_limits': {'D1': 50}}, 'D1'), [128, 128, 128])  # old limit migrates
 
     def test_image_must_look_like_a_pijuice_firmware(self):
         check_firmware_file(str(self.image))

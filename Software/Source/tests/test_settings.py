@@ -71,8 +71,8 @@ class FakeService(PiJuiceService):
     def get_system_power_switch(self): return 2100
     def get_led_config(self, led): return copy.deepcopy(self.led_config)
     def set_led_config(self, led, cfg): self.write('led', led, cfg)
-    def get_led_limit(self, led): return 100
-    def set_led_limit(self, led, percent): self.write('limit', led, percent)
+    def get_led_white(self, led): return [255, 255, 255]
+    def set_led_white(self, led, rgb): self.write('white', led, list(rgb))
     def get_button_config(self, button):
         return {event: {'function': 'NO_FUNC', 'parameter': 100} for event in self.button_events}
     def set_button_config(self, button, cfg): self.write('button', button, cfg)
@@ -172,11 +172,13 @@ class SettingsTests(unittest.TestCase):
         drain()
         self.assertFalse(view.dirty)
         self.assertEqual([c[1][0] for c in self.service.calls if c[0] == 'led'][-2:], ['D1', 'D2'])
-        view._rows['D2']['limit'].set_value(55)
-        self.assertEqual(view._rows['D2']['function'].get_selected(), 1)  # still Charge status: the limit is not a colour edit
+        view._rows['D2']['white'][1].set_value(100)
+        self.assertEqual(view._rows['D2']['function'].get_selected(), 1)  # still Charge status: calibration is not a colour edit
         view._on_apply(None)
         drain()
-        self.assertIn(('limit', ['D2', 55]), [(c[0], list(c[1])) for c in self.service.calls])
+        self.assertIn(('white', ['D2', [255, 100, 255]]), [(c[0], list(c[1])) for c in self.service.calls])
+        rgba = view._rows['D1']['picker'].get_rgba()                       # the picker follows the channels
+        self.assertEqual(round(rgba.red * 255), 99)
 
     def test_duplicate_write_is_not_submitted(self):
         view = self.view(LedView)
