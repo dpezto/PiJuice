@@ -1,4 +1,4 @@
-## Unreleased
+## Version 1.10
 
 ### Software
 pijuice-gui; urgency=low

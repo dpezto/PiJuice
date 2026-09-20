@@ -554,18 +554,26 @@ Click Apply button to save new settings.
 
 Last but very much not least is the firmware menu. This allows you to update the firmware on the PiJuice MCU chip as and when necessary meaning we can actively improve the firmware and any updates or improvements we make in the future can be retrospectively applied to all PiJuice HATs!
 
-*Note: that the PiJuice package you installed comes with a default firmware located at the path below:*
-```text
-/usr/share/pijuice/data/firmware/
-```
+The package ships one firmware image in `/usr/share/pijuice/data/firmware/`,
+named `PiJuice-V<major>.<minor>_<YYYY_MM_DD>.elf.binary` (1.10 ships V1.6).
+The GUI and CLI take the highest version from that filename, compare it with
+the version the HAT reports, and offer **Update firmware** only when the file
+is newer. To flash a different image, drop it in that directory.
 
-the filename would look like `PiJuice-V1.2-2018_05_02.elf.binary`
+How an update works: the app refuses to start on battery below 20 %, then runs
+`pijuiceboot <i2c address> <file>` on the service worker so nothing else uses
+the bus. `pijuiceboot` (`Firmware/pijuiceboot.c`, prebuilt in
+`Software/Source/bin/`) asks the running firmware to jump into the MCU's
+built-in I2C bootloader at address `0x41`, erases the flash pages the image
+needs, writes it in 256-byte pages from the end backwards, reads every page
+back to verify it, then jumps to the new code. The apps wait up to 30 s for the
+HAT to answer again. A failed step reports its reason (bus access, bootloader
+did not answer, erase, write, verify, execute); if the HAT no longer answers,
+hold SW3 while applying power to enter the bootloader manually and run
+`pijuiceboot` from a terminal (see `Firmware/README.md`).
 
-If you want to use the GUI to update the firmware to a more recent version you will have to override this file with the new one that you can download from our [Firmware section](https://github.com/PiSupply/PiJuice/tree/master/Firmware).
-
-*Remember though that the firmware we provide in the software package you've obtained from either APT or Github is generally the only one you should ever use for that specific version of Software release, therefore only update the firmware if the GUI reports that the firmware is not up to date or if we instruct you to do so.*
-
-During the update the window may become unresponsive. **Wait until the update is finished** before you continue with anything else.
+Stop the `pijuice` service before a manual `pijuiceboot` run so its polling
+does not interleave with the bootloader protocol.
 
 ## PiJuice CLI
 

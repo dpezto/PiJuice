@@ -1,3 +1,23 @@
+pijuice-base (1.10) unstable; urgency=low
+
+  * pijuice_cli: all HAT access through pijuice_service; a changed I2C address
+    is persisted; firmware update errors, profile apply, RTC clock, IO field
+    errors and the LED function label fixed; failures never leave a traceback.
+  * pijuice_sys: re-arms the RTC alarm, wakeup enable, RTC time and
+    wakeup-on-charge lost after a full battery drain; battery tracking, the
+    charge limit and the power_supply feed run regardless of System Task;
+    journald priority prefixes on every log line.
+  * pijuice_power 1.3: charge_full_design separate from charge_full, learned
+    charge_full, cycle_count, health, time_to_empty_now; uevent only on change;
+    no phantom battery before the daemon writes; present=0 on stop.
+  * pijuice.py: SetTime subsecond, 60 s/min bounds, --version without args.
+  * pijuice_log: import-safe main(), configured bus/address, no crash on
+    MESSAGE/VALUE records.
+  * Packaging: 32-bit kernel headers accepted, Python >= 3.11, sudoers narrowed,
+    the unit owns /run/pijuice, stdeb/setup.py path removed.
+
+ -- Dai López <dpezto@gmail.com>  Sun, 20 Sep 2026 08:47:25 -0600
+
 pijuice-base (1.9) unstable; urgency=low
 
   * pijuice_power 1.1: expose charge_full/charge_full_design/charge_now so

@@ -1,3 +1,13 @@
+pijuice-gui (1.10) unstable; urgency=low
+
+  * pijuice_gtk: status power-switch is not a draft (window could not close),
+    no toast storm on a lost HAT, dialogs cannot stack, alarm refresh resets
+    every field, apply handlers catch every error, IO rows no longer leak.
+    Shared helpers come from pijuice_service (needs pijuice-base >= 1.10).
+  * pijuice_tray: unused PID file removed.
+
+ -- Dai López <dpezto@gmail.com>  Sun, 20 Sep 2026 08:47:25 -0600
+
 pijuice-gui (1.9) unstable; urgency=low
 
   * Version bump alongside pijuice-base 1.9.
