@@ -4,44 +4,44 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=import-error
 import copy
-import math
 import datetime
+import fcntl
+import glob
 import os
 import re
-import subprocess
-import time
-import fcntl
-import json
 import sys
+import time
 
-from pijuice_battery import battery_report, charge_policy, profile_label
+from pijuice_battery import profile_label
 
 import urwid
 from pijuice import (
-    PiJuice,
     PiJuiceConfig,
     pijuice_hard_functions,
     pijuice_sys_functions,
     pijuice_user_functions,
 )
 
-# Shared, UI-agnostic helpers (paths, config I/O, service notify) live in
-# pijuice_service so the CLI, GUI and tray agree on one source of truth.
+# All HAT access and config I/O go through the shared service facade, like the
+# GTK app and tray, so the I2C domain logic lives in exactly one place.
 from pijuice_service import (
-    ADDRESS_DEFAULT,
-    BUS_DEFAULT,
     CONFIG_PATH_DEFAULT,
     PID_FILE_DEFAULT,
+    PiJuiceError,
+    PiJuiceService,
+    alarm_fields,
+    firmware_error,
     load_config as _service_load_config,
-    notify_service as _service_notify_service,
-    save_config as _service_save_config,
+    readable,
+    rtc_fields_now,
+    schedule_values,
+    validate_number,
+    version_to_str,
 )
 
 class ActionButton(urwid.Button):
     """Keep form errors recoverable and protect drafts from explicit refreshes."""
     def __init__(self, label, on_press=None, user_data=None):
-        self.action = on_press
-        self.action_data = user_data
         def dispatch(button, *args):
             if str(label).lower().startswith("refresh") and _dirty:
                 _flash("Unsaved changes kept. Apply (F5) or discard (F6) before refreshing.", "warning")
@@ -65,171 +65,49 @@ class ActionButton(urwid.Button):
 urwid.Button.button_left = urwid.Text("[")
 urwid.Button.button_right = urwid.Text("]")
 
-BUS = BUS_DEFAULT
-ADDRESS = ADDRESS_DEFAULT
 PID_FILE = PID_FILE_DEFAULT
 LOCK_FILE = "/run/pijuice/pijuice_gui.lock"  # CLI-only single-instance lock
 
-pijuice = None
+service = None  # PiJuiceService; built in _build_and_run (tests inject a fake)
 
 pijuiceConfigData = {}
 PiJuiceConfigDataPath = CONFIG_PATH_DEFAULT
 
-# NumEdit/FloatEdit are vendored from urwid because urwid still ships no such
-# widget (2.1.2 has IntEdit only) -- do not delete this block.
-#### Following taken from urwid 2.0.2 to get a FloatEdit widget ###
-#
-# Urwid basic widget classes
-#    Copyright (C) 2004-2012  Ian Ward
-#
-#    This library is free software; you can redistribute it and/or
-#    modify it under the terms of the GNU Lesser General Public
-#    License as published by the Free Software Foundation; either
-#    version 2.1 of the License, or (at your option) any later version.
-#
-#    This library is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-#    Lesser General Public License for more details.
-#
-#    You should have received a copy of the GNU Lesser General Public
-#    License along with this library; if not, write to the Free Software
-#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-#
-# Urwid web site: http://excess.org/urwid/
+
+def _fw():
+    """Connected firmware version as ``(major << 4) | minor``; 0 when unknown."""
+    return service.fw_int if service is not None else 0
 
 
-from urwid import Edit
-from decimal import Decimal
+# FloatEdit: urwid ships IntEdit only. Trimmed from urwid 2.0.2 (LGPL 2.1,
+# Copyright (C) 2004-2012 Ian Ward, http://excess.org/urwid/).
+class NumEdit(urwid.Edit):
+    """Edit restricted to the characters in *allowed*; strips leading zeros."""
 
-
-def _InitPiJuiceInterface():
-    try:
-        addr = ADDRESS
-        bus = BUS
-        global pijuiceConfigData
-        if pijuiceConfigData == None:
-            pijuiceConfigData = loadPiJuiceConfig()
-        if "board" in pijuiceConfigData and "general" in pijuiceConfigData["board"]:
-            if "i2c_addr" in pijuiceConfigData["board"]["general"]:
-                addr = int(pijuiceConfigData["board"]["general"]["i2c_addr"], 16)
-            if "i2c_bus" in pijuiceConfigData["board"]["general"]:
-                bus = pijuiceConfigData["board"]["general"]["i2c_bus"]
-        global pijuice
-        pijuice = PiJuice(bus, addr)
-        global current_fw_version
-        current_fw_version = get_current_fw_version()
-    except:
-        pijuice = None
-
-
-class NumEdit(Edit):
-    """NumEdit - edit numerical types
-
-    based on the characters in 'allowed' different numerical types
-    can be edited:
-      + regular int: 0123456789
-      + regular float: 0123456789.
-      + regular oct: 01234567
-      + regular hex: 0123456789abcdef
-    """
-
-    ALLOWED = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-    def __init__(self, allowed, caption, default, trimLeadingZeros=True):
-        super(NumEdit, self).__init__(caption, default)
+    def __init__(self, allowed, caption, default):
+        super().__init__(caption, default)
         self._allowed = allowed
-        self.trimLeadingZeros = trimLeadingZeros
 
     def valid_char(self, ch):
-        """
-        Return true for allowed characters.
-        """
         return len(ch) == 1 and ch.upper() in self._allowed
 
     def keypress(self, size, key):
-        """
-        Handle editing keystrokes.  Remove leading zeros.
-        """
-        (maxcol,) = size
-        unhandled = Edit.keypress(self, (maxcol,), key)
-
+        unhandled = super().keypress(size, key)
         if not unhandled:
-            if self.trimLeadingZeros:
-                # trim leading zeros
-                while self.edit_pos > 0 and self.edit_text[:1] == "0":
-                    self.set_edit_pos(self.edit_pos - 1)
-                    self.set_edit_text(self.edit_text[1:])
-
+            while self.edit_pos > 0 and self.edit_text[:1] == "0":
+                self.set_edit_pos(self.edit_pos - 1)
+                self.set_edit_text(self.edit_text[1:])
         return unhandled
 
 
 class FloatEdit(NumEdit):
-    """Edit widget for float values."""
-
-    def __init__(
-        self, caption="", default=None, preserveSignificance=False, decimalSeparator="."
-    ):
-        """
-        caption -- caption markup
-        default -- default edit value
-        preserveSignificance -- return value has the same signif. as default
-        decimalSeparator -- use '.' as separator by default, optionally a ','
-        """
-        self.significance = None
-        self._decimalSeparator = decimalSeparator
-        if decimalSeparator not in [".", ","]:
-            raise ValueError("invalid decimalSeparator: {}".format(decimalSeparator))
-
-        val = ""
-        if default is not None and default != "":
-            if not isinstance(default, (int, str, float, Decimal)):
-                raise ValueError(
-                    "default: Only 'str', 'int', 'float' or Decimal input allowed"
-                )
-
-            if isinstance(default, str) and len(default) and preserveSignificance:
-                default = Decimal(default)
-
-            if preserveSignificance:
-                self.significance = abs(default.as_tuple()[2])
-
-            val = str(default)
-
-        super(FloatEdit, self).__init__(
-            self.ALLOWED[0:10] + decimalSeparator, caption, val
-        )
-
-
-####################################################################################
-
-
-def version_to_str(number):
-    # Convert int version to str {major}.{minor}
-    return "{}.{}".format(number >> 4, number & 15)
-
-
-def get_current_fw_version():
-    # Returns current version as int (first 4 bits - minor, second 4 bits - major)
-    status = pijuice.config.GetFirmwareVersion()
-
-    if status["error"] == "NO_ERROR":
-        major, minor = status["data"]["version"].split(".")
-    else:
-        major = minor = 0
-    current_version = (int(major) << 4) + int(minor)
-    return current_version
+    def __init__(self, caption="", default=None):
+        super().__init__("0123456789.", caption, "" if default is None else str(default))
 
 
 def validate_value(text, type, min, max, old):
-    """Validate a complete number; never silently clamp or substitute a value."""
-    try:
-        value = int(text) if type == "int" else float(text)
-        if not math.isfinite(value) or (min is not None and value < min) or (max is not None and value > max):
-            raise ValueError()
-    except (ValueError, TypeError):
-        raise ValueError("Enter a %s between %s and %s." % ("whole number" if type == "int" else "number", min, max))
-    return str(value)
+    """Validate a complete number as text; never silently clamp or substitute."""
+    return str(validate_number(text, type, min, max))
 
 
 def _validate_edit(widget, text, kind, lo, hi, key):
@@ -246,18 +124,28 @@ def _validate_edit(widget, text, kind, lo, hi, key):
 
 def confirmation_dialog(text, next, nextno="", single_option=True):
     global _in_dialog, _dialog_cancel
-    if single_option and any(word in text.lower() for word in ("successfully", "settings saved", "settings have been refreshed", "settings have been applied", "updated settings for all pins")):
+    if single_option and any(word in text.lower() for word in ("successfully", "settings saved", "settings have been refreshed", "settings have been applied")):
         _saved_draft()
         result = next(None)
         _flash(text.replace("\n", " "), "ok")
         return result
 
     def done(cb, *bound):
-        # Wrap a dialog callback so it clears the dialog flag before running.
+        # Wrap a dialog callback so it clears the dialog flag before running and
+        # a failed action lands on a message, not a traceback.
         def inner(*a):
             global _in_dialog
             _in_dialog = False
-            return cb(*(bound if bound else a))
+            try:
+                return cb(*(bound if bound else a))
+            except urwid.ExitMainLoop:
+                raise
+            except Exception as exc:
+                if _active_tab is not None and hasattr(_active_tab, "main"):
+                    _active_tab.main()
+                else:
+                    main_menu()
+                _flash("Could not complete the operation: %s. Your edits are kept." % exc, "error")
 
         return inner
 
@@ -297,15 +185,14 @@ class StatusTab(object):
         self.main()
 
     def get_status(self):
-        if pijuice is None:
-            _InitPiJuiceInterface()
-        status = pijuice.status.GetStatus() if pijuice else {"error": "NO_CONNECTION"}
-        if status.get("error") != "NO_ERROR":
-            _InitPiJuiceInterface()
+        try:
+            if not service.available:
+                service.connect()
+            data = service.get_status()
+            charge = service.get_charge_level()
+        except PiJuiceError:
             return [("error", "Not connected — retrying automatically\n"),
                     "Check the HAT and I2C connection. Settings remain available.\n"]
-        data = status.get("data", {})
-        charge = pijuice.status.GetChargeLevel().get("data")
         rows = [("title", "BATTERY & POWER\n\n")]
         if charge is None:
             rows.append(("warning", "Charge unavailable\n"))
@@ -317,25 +204,30 @@ class StatusTab(object):
         battery = data.get("battery", "UNKNOWN")
         rows += [("warning" if battery == "NOT_PRESENT" else "value", readable(battery) + "\n\n")]
         for label, method, scale, unit in (
-                ("Voltage", pijuice.status.GetBatteryVoltage, 1000, "V"),
-                ("Temperature", pijuice.status.GetBatteryTemperature, 1, "°C")):
-            result = method().get("data")
+                ("Voltage", service.get_battery_voltage, 1000, "V"),
+                ("Temperature", service.get_battery_temperature, 1, "°C")):
+            try:
+                result = method()
+            except PiJuiceError:
+                result = None
             value = "Unavailable" if result is None or result == -999 else "%g %s" % (result / scale, unit)
             rows += [("muted", label + ": "), value + "\n"]
         rows.append("\n")
         for label, key in (("USB input", "powerInput"), ("GPIO input", "powerInput5vIo")):
             value = data.get(key, "UNKNOWN")
             rows += [("muted", label + ": "), ("ok" if value == "PRESENT" else "value", readable(value) + "\n")]
-        fault = pijuice.status.GetFaultStatus()
         problems = []
-        if fault.get("error") != "NO_ERROR":
-            problems.append("Unable to read faults")
-        else:
-            for key, value in fault.get("data", {}).items():
+        try:
+            for key, value in (service.get_fault_status() or {}).items():
                 if key in ("battery_profile_invalid", "charging_temperature_fault") and value and value not in ("NORMAL", "NO_ERROR"):
                     problems.append(readable(key) + (": " + readable(value) if isinstance(value, str) else ""))
+        except PiJuiceError:
+            problems.append("Unable to read faults")
         rows += [("muted", "Health: "), ("error" if problems else "ok", "; ".join(problems) if problems else "No faults"), "\n"]
-        switch = pijuice.power.GetSystemPowerSwitch().get("data")
+        try:
+            switch = service.get_system_power_switch()
+        except PiJuiceError:
+            switch = None
         rows += [("muted", "System switch: "), "Unavailable" if switch is None else "%s mA" % switch if switch else "Off"]
         return rows
 
@@ -381,10 +273,7 @@ class StatusTab(object):
 
     def set_power_switch(self, button, value):
         def apply(*_args):
-            result = pijuice.power.SetSystemPowerSwitch(int(value))
-            if result.get("error") != "NO_ERROR":
-                _flash("Power switch unchanged: " + result.get("error", "Unknown error"), "error")
-                return
+            service.set_system_power_switch(value)
             self.main()
             _flash("System power switch updated.", "ok")
         if value == 0:
@@ -399,20 +288,6 @@ class StatusTab(object):
 
 
 class FirmwareTab(object):
-    FIRMWARE_UPDATE_ERRORS = [
-        "NO_ERROR",
-        "I2C_BUS_ACCESS_ERROR",
-        "INPUT_FILE_OPEN_ERROR",
-        "STARTING_BOOTLOADER_ERROR",
-        "FIRST_PAGE_ERASE_ERROR",
-        "EEPROM_ERASE_ERROR",
-        "INPUT_FILE_READ_ERROR",
-        "PAGE_WRITE_ERROR",
-        "PAGE_READ_ERROR",
-        "PAGE_VERIFY_ERROR",
-        "CODE_EXECUTE_ERROR",
-    ]
-
     def __init__(self, *args):
         self.firmware_path = None
         self.show_firmware()
@@ -420,8 +295,6 @@ class FirmwareTab(object):
     def check_for_fw_updates(self):
         # Check /usr/share/pijuice/data/firmware/ for new version of firmware.
         # Returns (version, path)
-        import glob
-
         bin_dir = "/usr/share/pijuice/data/firmware/"
         latest_version = 0
         firmware_path = ""
@@ -440,8 +313,7 @@ class FirmwareTab(object):
         return latest_version, firmware_path
 
     def get_fw_status(self):
-        global current_fw_version
-        current_version = current_fw_version
+        current_version = _fw()
         latest_version, firmware_path = self.check_for_fw_updates()
 
         if current_version and latest_version:
@@ -460,18 +332,12 @@ class FirmwareTab(object):
         return current_version, latest_version, firmware_status, firmware_path
 
     def update_firmware_start(self, *args):
-        device_status = pijuice.status.GetStatus()
-
-        if device_status["error"] == "NO_ERROR":
-            if (
-                device_status["data"]["powerInput"] != "PRESENT"
-                and device_status["data"]["powerInput5vIo"] != "PRESENT"
-                and pijuice.status.GetChargeLevel().get("data", 0) < 20
-            ):
-                # Charge level is too low
-                return confirmation_dialog(
-                    "Charge level is too low", next=main_menu, single_option=True
-                )
+        status = service.get_status()
+        if (status["powerInput"] != "PRESENT" and status["powerInput5vIo"] != "PRESENT"
+                and service.get_charge_level() < 20):
+            return confirmation_dialog(
+                "Charge level is too low", next=main_menu, single_option=True
+            )
         confirmation_dialog(
             "Are you sure you want to update the firmware?",
             next=self.update_firmware,
@@ -480,97 +346,38 @@ class FirmwareTab(object):
         )
 
     def update_firmware(self, *args):
-        global current_fw_version
-        current_addr = pijuice.config.interface.GetAddress()
-        error_status = None
-        if current_addr:
-            # Set up the 'Wait for update' screen
-            spinner = ["-", "\\", "|", "/"]
-            i = 0
-            waittext = urwid.Text(
-                "Updating firmware, Wait " + spinner[i], align="center"
-            )
-            main.original_widget = urwid.Filler(
-                urwid.LineBox(
-                    urwid.Pile(
-                        [
-                            waittext,
-                            urwid.Divider(),
-                            urwid.Text(
-                                "Interrupting this process can lead to a non-functional device.",
-                                align="center",
-                            ),
-                        ]
-                    )
-                )
-            )
+        spinner = "-\\|/"
+        waittext = urwid.Text("Updating firmware, Wait -", align="center")
+        main.original_widget = urwid.Filler(urwid.LineBox(urwid.Pile([
+            waittext, urwid.Divider(),
+            urwid.Text("Interrupting this process can lead to a non-functional device.", align="center"),
+        ])))
+        loop.draw_screen()
+        # pijuiceboot runs on the service worker so nothing else touches the bus.
+        future = service.submit(service.flash_firmware, self.firmware_path)
+        i = 0
+        while not future.done():
+            time.sleep(0.3)
+            i = (i + 1) % 4
+            waittext.set_text("Updating firmware, Wait " + spinner[i])
             loop.draw_screen()
-            # Start the firmware update in a subprocess
-            addr = format(current_addr, "x")
-            with open("/dev/null", "w") as f:  # Suppress pijuiceboot output
-                p = subprocess.Popen(
-                    ["pijuiceboot", addr, self.firmware_path],
-                    stdout=f,
-                    stderr=subprocess.STDOUT,
-                )
-            # Show the 'Wait for update' screen  with a rotating spinner
-            finished = False
-            while not finished:
-                try:
-                    finished = True
-                    p.communicate(timeout=0.3)
-                except subprocess.TimeoutExpired:
-                    finished = False
-                if not finished:
-                    i = (i + 1) % 4
-                    waittext.set_text("Updating firmware, Wait " + spinner[i])
-                    loop.draw_screen()
-            # Check the result
-            result = 256 - p.returncode
-            if result != 256:
-                error_status = (
-                    self.FIRMWARE_UPDATE_ERRORS[result] if result < 11 else "UNKNOWN"
-                )
-                messages = {
-                    "I2C_BUS_ACCESS_ERROR": "Check if I2C bus is enabled.",
-                    "INPUT_FILE_OPEN_ERROR": "Firmware binary file might be missing or damaged.",
-                    "STARTING_BOOTLOADER_ERROR": "Try to start bootloader manually. Press and hold button SW3 while powering up RPI and PiJuice.",
-                    "UNKNOWN_ADDRESS": "Unknown PiJuice I2C address",
-                }
+        try:
+            reason = firmware_error(future.result())
+        except PiJuiceError as exc:
+            reason = str(exc)
+        if reason:
+            message = "Firmware update failed.\nReason: " + reason
         else:
-            error_status = "UNKNOWN_ADDRESS"
-
-        if error_status:
-            message = (
-                "Firmware update failed.\nReason: "
-                + error_status
-                + ". "
-                + messages.get(error_status, "")
-            )
-        else:
-            # Wait till firmware has restarted (current_version != 0)
-            main.original_widget = urwid.Filler(
-                urwid.LineBox(
-                    urwid.Pile(
-                        [
-                            urwid.Divider(),
-                            urwid.Text("Waiting for firmware restart.", align="center"),
-                            urwid.Divider(),
-                        ]
-                    )
-                )
-            )
+            main.original_widget = urwid.Filler(urwid.LineBox(urwid.Pile([
+                urwid.Divider(), urwid.Text("Waiting for firmware restart.", align="center"), urwid.Divider(),
+            ])))
             loop.draw_screen()
-            current_version = 0
-            while current_version == 0:
-                current_version = get_current_fw_version()
-                time.sleep(0.2)
-            current_fw_version = current_version
-            message = (
-                "Firmware update successful"
-                + ": V"
-                + version_to_str(current_fw_version)
-            )
+            for _ in range(60):  # ponytail: bounded 30 s wait; the HAT reboots in a few
+                time.sleep(0.5)
+                if service.connect():
+                    break
+            message = ("Firmware update successful: V" + version_to_str(_fw()) if service.available else
+                       "Firmware written, but the device has not reconnected yet. Check power and reopen this section.")
 
         confirmation_dialog(message, single_option=True, next=self.show_firmware)
 
@@ -619,48 +426,24 @@ class GeneralTab(object):
     POWER_REGULATOR_MODES = PiJuiceConfig.powerRegulatorModes
 
     def __init__(self, *args):
-        try:
-            self.current_config = self._get_device_config()
-            self.main()
-        except:
-            confirmation_dialog(
-                "Unable to connect to device", single_option=True, next=main_menu
-            )
+        self.current_config = self._get_device_config()
+        self.main()
 
     def _get_device_config(self):
         config = {}
-        config["run_pin"] = self.RUN_PIN_VALUES.index(
-            pijuice.config.GetRunPinConfig().get("data")
-        )
-        config["i2c_addr"] = pijuice.config.GetAddress(1).get("data")
-        config["i2c_addr_rtc"] = pijuice.config.GetAddress(2).get("data")
-        config["eeprom_addr"] = self.EEPROM_ADDRESSES.index(
-            pijuice.config.GetIdEepromAddress().get("data")
-        )
-        config[
-            "eeprom_write_unprotected"
-        ] = not pijuice.config.GetIdEepromWriteProtect().get("data", False)
-        result = pijuice.config.GetPowerInputsConfig()
-        if result["error"] == "NO_ERROR":
-            pow_config = result["data"]
-            config["precedence"] = self.INPUTS_PRECEDENCE.index(
-                pow_config["precedence"]
-            )
-            config["gpio_in_enabled"] = pow_config["gpio_in_enabled"]
-            config["usb_micro_current_limit"] = self.USB_CURRENT_LIMITS.index(
-                pow_config["usb_micro_current_limit"]
-            )
-            config["usb_micro_dpm"] = self.USB_MICRO_IN_DPMS.index(
-                pow_config["usb_micro_dpm"]
-            )
-            config["no_battery_turn_on"] = pow_config["no_battery_turn_on"]
-
-        config["power_reg_mode"] = self.POWER_REGULATOR_MODES.index(
-            pijuice.config.GetPowerRegulatorMode().get("data")
-        )
-        config["charging_enabled"] = (
-            pijuice.config.GetChargingConfig().get("data", {}).get("charging_enabled")
-        )
+        config["run_pin"] = self.RUN_PIN_VALUES.index(service.get_run_pin())
+        config["i2c_addr"] = service.get_address(1)
+        config["i2c_addr_rtc"] = service.get_address(2)
+        config["eeprom_addr"] = self.EEPROM_ADDRESSES.index(service.get_id_eeprom_address())
+        config["eeprom_write_unprotected"] = not service.get_id_eeprom_write_protect()
+        pow_config = service.get_power_inputs()
+        config["precedence"] = self.INPUTS_PRECEDENCE.index(pow_config["precedence"])
+        config["gpio_in_enabled"] = pow_config["gpio_in_enabled"]
+        config["usb_micro_current_limit"] = self.USB_CURRENT_LIMITS.index(pow_config["usb_micro_current_limit"])
+        config["usb_micro_dpm"] = self.USB_MICRO_IN_DPMS.index(pow_config["usb_micro_dpm"])
+        config["no_battery_turn_on"] = pow_config["no_battery_turn_on"]
+        config["power_reg_mode"] = self.POWER_REGULATOR_MODES.index(service.get_power_regulator_mode())
+        config["charging_enabled"] = service.get_charging_config().get("charging_enabled")
         return config
 
     def main(self, *args):
@@ -811,8 +594,8 @@ class GeneralTab(object):
         self.main()
 
     def _apply_settings(self, *args):
-        if loadPiJuiceConfig().get("battery_management", {}).get("enabled"):
-            actual = pijuice.config.GetChargingConfig().get("data", {}).get("charging_enabled")
+        if service.get_charge_policy()["enabled"]:
+            actual = service.get_charging_config().get("charging_enabled")
             if self.current_config.get("charging_enabled") != actual:
                 raise ValueError("Charging is managed by the 80% limit. Disable it in Battery care before changing charging manually.")
 
@@ -825,40 +608,32 @@ class GeneralTab(object):
 
         for i, addr in enumerate(["i2c_addr", "i2c_addr_rtc"]):
             if addr in changed:
-                value = device_config[addr]
                 try:
                     new_value = int(str(self.current_config[addr]), 16)
-                    if new_value >= 8 and new_value <= 0x77:
-                        value = self.current_config[addr]
-                    else:
-                        self.current_config[addr] = value
-                        return confirmation_dialog(
-                            "I2C address has to be between 0x08 and 0x77",
-                            next=self.main,
-                        )
-                except:
-                    pass
-                pijuice.config.SetAddress(i + 1, value)
-                global pijuiceConfigData
-                pijuiceConfigData.setdefault("board", {}).setdefault("general", {})[
-                    "i2c_addr" + ["", "_rtc"][i]
-                ] = value
-                savePiJuiceConfig()
-                _InitPiJuiceInterface()
+                except ValueError:
+                    new_value = -1
+                if not 8 <= new_value <= 0x77:
+                    self.current_config[addr] = device_config[addr]
+                    return confirmation_dialog(
+                        "I2C address has to be between 0x08 and 0x77",
+                        next=self.main,
+                    )
+                value = self.current_config[addr]
+                service.set_address(i + 1, value)
+                # Persist under board.general so the next launch reconnects.
+                board = loadPiJuiceConfig().get("board", {})
+                board.setdefault("general", {})["i2c_addr" + ["", "_rtc"][i]] = value
+                service.save_section("board", board)
+                pijuiceConfigData["board"] = board
+                service.connect()
 
         if "run_pin" in changed:
-            pijuice.config.SetRunPinConfig(
-                self.RUN_PIN_VALUES[self.current_config["run_pin"]]
-            )
+            service.set_run_pin(self.RUN_PIN_VALUES[self.current_config["run_pin"]])
 
         if "eeprom_addr" in changed:
-            pijuice.config.SetIdEepromAddress(
-                self.EEPROM_ADDRESSES[self.current_config["eeprom_addr"]]
-            )
+            service.set_id_eeprom_address(self.EEPROM_ADDRESSES[self.current_config["eeprom_addr"]])
         if "eeprom_write_unprotected" in changed:
-            pijuice.config.SetIdEepromWriteProtect(
-                not self.current_config["eeprom_write_unprotected"]
-            )
+            service.set_id_eeprom_write_protect(not self.current_config["eeprom_write_unprotected"])
 
         if set(
             [
@@ -880,16 +655,12 @@ class GeneralTab(object):
                     self.current_config["usb_micro_dpm"]
                 ],
             }
-            pijuice.config.SetPowerInputsConfig(config, True)
+            service.set_power_inputs(config)
 
         if "power_reg_mode" in changed:
-            pijuice.config.SetPowerRegulatorMode(
-                self.POWER_REGULATOR_MODES[self.current_config["power_reg_mode"]]
-            )
+            service.set_power_regulator_mode(self.POWER_REGULATOR_MODES[self.current_config["power_reg_mode"]])
         if "charging_enabled" in changed:
-            pijuice.config.SetChargingConfig(
-                {"charging_enabled": self.current_config["charging_enabled"]}, True
-            )
+            service.set_charging_config(self.current_config["charging_enabled"])
 
         # Give PiJuice MCU sufficient time to change the settings before reading them back
         time.sleep(0.2)
@@ -899,22 +670,14 @@ class GeneralTab(object):
         )
 
     def _reset_settings(self, button, is_confirmed):
-        if is_confirmed:
-            error = pijuice.config.SetDefaultConfiguration().get("error", "NO_ERROR")
-            if error == "NO_ERROR":
-                confirmation_dialog(
-                    "Settings have been reset to their default values",
-                    single_option=True,
-                    next=main_menu,
-                )
-            else:
-                confirmation_dialog(
-                    "Failed to reset settings: " + error,
-                    single_option=True,
-                    next=main_menu,
-                )
-        else:
-            self.main()
+        if not is_confirmed:
+            return self.main()
+        service.set_default_configuration()
+        confirmation_dialog(
+            "Settings have been reset to their default values",
+            single_option=True,
+            next=main_menu,
+        )
 
 
 class LEDTab(object):
@@ -954,16 +717,12 @@ class LEDTab(object):
     def configure_led(self, button, index):
         elements = [urwid.Text("LED " + self.LED_NAMES[index]), urwid.Divider()]
         colors = ("R", "G", "B")
-        button = attrmap(
-            ActionButton(
-                "Function: {value}".format(
-                    value=self.current_config[index]["function"]
-                ),
-                on_press=self._list_functions,
-                user_data=index,
-            )
+        self._function_button = ActionButton(
+            "Function: {value}".format(value=self.current_config[index]["function"]),
+            on_press=self._list_functions,
+            user_data=index,
         )
-        elements.append(urwid.Padding(button, width=30))
+        elements.append(urwid.Padding(attrmap(self._function_button), width=30))
         for color in colors:
             color_edit = urwid.Edit(
                 color + ": ",
@@ -988,19 +747,10 @@ class LEDTab(object):
 
     def _get_led_config(self):
         config = []
-        for i in range(len(self.LED_NAMES)):
-            result = pijuice.config.GetLedConfiguration(self.LED_NAMES[i])
-            led_config = {}
-            try:
-                led_config["function"] = result["data"]["function"]
-            except ValueError:
-                led_config["function"] = self.LED_FUNCTIONS_OPTIONS[0]
-            led_config["color"] = [
-                result["data"]["parameter"]["r"],
-                result["data"]["parameter"]["g"],
-                result["data"]["parameter"]["b"],
-            ]
-            config.append(led_config)
+        for name in self.LED_NAMES:
+            result = service.get_led_config(name)
+            config.append({"function": result.get("function", self.LED_FUNCTIONS_OPTIONS[0]),
+                           "color": [result["parameter"][c] for c in ("r", "g", "b")]})
         return config
 
     def _refresh_settings(self, *args):
@@ -1019,9 +769,7 @@ class LEDTab(object):
                     "b": self.current_config[i]["color"][2],
                 },
             }
-            result = pijuice.config.SetLedConfiguration(self.LED_NAMES[i], config)
-            if result.get("error") != "NO_ERROR":
-                raise ValueError("%s: %s. Earlier LED changes may already have applied." % (self.LED_NAMES[i], result.get("error")))
+            service.set_led_config(self.LED_NAMES[i], config)
 
         self.current_config = self._get_led_config()
         confirmation_dialog(
@@ -1068,7 +816,9 @@ class LEDTab(object):
         color_index = data["color_index"]
         key = "%s %s" % (self.LED_NAMES[led_index], ("Red", "Green", "Blue")[color_index])
         self.current_config[led_index]["color"][color_index] = _validate_edit(edit, text, "int", 0, 255, key)
-        self.current_config[led_index]["function"] = "USER_LED"
+        if self.current_config[led_index]["function"] != "USER_LED":
+            self.current_config[led_index]["function"] = "USER_LED"
+            self._function_button.set_label("Function: USER_LED")
 
 
 
@@ -1080,7 +830,6 @@ class ButtonsTab(object):
         + pijuice_user_functions
     )
     BUTTONS = PiJuiceConfig.buttons
-    EVENTS = PiJuiceConfig.buttonEvents
 
     def __init__(self):
         self.device_config = self._get_device_config()
@@ -1245,46 +994,17 @@ class ButtonsTab(object):
                 _flash("Button delays must use steps of 100 ms.", "error")
 
     def _get_device_config(self):
-        config = {}
-        got_error = False
-        for button in self.BUTTONS:
-            button_config = pijuice.config.GetButtonConfiguration(button)
-            if button_config.get("error") == "NO_ERROR":
-                config[button] = button_config.get("data")
-            else:
-                config[button] = {}
-                got_error = True
-
-        if got_error:
-            confirmation_dialog(
-                "Failed to connect to PiJuice", next=main_menu, single_option=True
-            )
-        else:
-            return config
+        return {button: service.get_button_config(button) for button in self.BUTTONS}
 
     def _apply_settings(self, *args):
-        got_error = False
-        errors = []
         for button in self.BUTTONS:
-            error_msg = pijuice.config.SetButtonConfiguration(
-                button, self.current_config[button]
-            ).get("error", "NO_ERROR")
-            errors.append(error_msg)
-            got_error |= error_msg != "NO_ERROR"
-
-        if got_error:
-            confirmation_dialog(
-                "Failed to apply settings: " + str(errors),
-                next=self.main,
-                single_option=True,
-            )
-        else:
-            self.device_config = self._get_device_config()
-            self.current_config = copy.deepcopy(self.device_config)
-            notify_service()
-            confirmation_dialog(
-                "Settings have been applied", next=self.main, single_option=True
-            )
+            service.set_button_config(button, self.current_config[button])
+        self.device_config = self._get_device_config()
+        self.current_config = copy.deepcopy(self.device_config)
+        service.retry_notify()  # the daemon caches button functions until SIGHUP
+        confirmation_dialog(
+            "Settings have been applied", next=self.main, single_option=True
+        )
 
 
 class IOTab(object):
@@ -1332,7 +1052,6 @@ class IOTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def configure_io(self, button, pin_id):
-        global current_fw_version
         elements = [urwid.Text("IO{}".format(pin_id + 1)), urwid.Divider()]
         pin_config = self.current_config[pin_id]
         mode = pin_config["mode"]
@@ -1369,7 +1088,7 @@ class IOTab(object):
             var_type = var_config.get("type", "str")
             var_min = var_config.get("min")
             var_max = var_config.get("max")
-            if var_name == "wakeup" and pin_id == 1 and current_fw_version >= 0x13:
+            if var_name == "wakeup" and pin_id == 1 and _fw() >= 0x13:
                 if pin_config["wakeup"] == "":
                     pin_config["wakeup"] = self.IO_CONFIG_PARAMS["DIGITAL_IN"][0][
                         "options"
@@ -1481,6 +1200,8 @@ class IOTab(object):
         for var in self.IO_CONFIG_PARAMS.get(mode, []):
             config[var["name"]] = ""
         self.current_config[pin_id] = config
+        for key in [k for k in _errors if k.startswith("IO%s " % (pin_id + 1))]:
+            _errors.pop(key)  # the fields those errors referred to are gone
         self.bgroup = []
         self.configure_io(None, pin_id)
 
@@ -1555,59 +1276,19 @@ class IOTab(object):
         self.configure_io(None, pin_id)
 
     def _get_device_config(self, *args):
-        config = []
-        for i in range(self.IO_PINS_COUNT):
-            result = pijuice.config.GetIoConfiguration(i + 1)
-            if result["error"] != "NO_ERROR":
-                confirmation_dialog(
-                    "Unable to connect to device: {}".format(result["error"]),
-                    next=main_menu,
-                    single_option=True,
-                )
-            else:
-                config.append(result["data"])
-        return config
+        return [service.get_io_config(i + 1) for i in range(self.IO_PINS_COUNT)]
 
     def _apply_settings(self, button, pin_id):
-        if pin_id >= self.IO_PINS_COUNT:
-            # Apply for all pins
-            errors = []
-            for i in range(self.IO_PINS_COUNT):
-                error_msg = self._apply_for_pin(i)
-                if error_msg != "NO_ERROR":
-                    errors.append(error_msg)
-            if errors:
-                confirmation_dialog(
-                    "Failed to apply some settings. Error: {}".format(errors),
-                    next=self.main,
-                    single_option=True,
-                )
-            else:
-                confirmation_dialog(
-                    "Updated settings for all pins", next=self.main, single_option=True
-                )
-        else:
-            error_msg = self._apply_for_pin(pin_id)
-            if error_msg != "NO_ERROR":
-                confirmation_dialog(
-                    "Failed to apply settings for IO{}. Error: {}".format(
-                        pin_id + 1, error_msg
-                    ),
-                    next=self.main,
-                    single_option=True,
-                )
-            else:
-                confirmation_dialog(
-                    "Updated settings for IO{}".format(pin_id + 1),
-                    next=self.main,
-                    single_option=True,
-                )
-
-    def _apply_for_pin(self, pin_id):
-        result = pijuice.config.SetIoConfiguration(
-            pin_id + 1, self.current_config[pin_id], True
+        pins = range(self.IO_PINS_COUNT) if pin_id >= self.IO_PINS_COUNT else [pin_id]
+        for i in pins:
+            try:
+                service.set_io_config(i + 1, self.current_config[i], True)
+            except PiJuiceError as exc:
+                raise PiJuiceError(exc.error, "IO%d" % (i + 1))
+        confirmation_dialog(
+            "Settings successfully updated for " + ("all pins" if len(pins) > 1 else "IO%d" % (pin_id + 1)),
+            next=self.main, single_option=True,
         )
-        return result.get("error", "NO_ERROR")
 
 
 class BatteryProfileTab(object):
@@ -1630,15 +1311,12 @@ class BatteryProfileTab(object):
     EDIT_EXTKEYS = ["ocv10", "ocv50", "ocv90", "r10", "r50", "r90"]
 
     def __init__(self, *args):
-        global current_fw_version
         self.status_text = ""
         self.custom_values = False
-        pijuice.config.SelectBatteryProfiles(current_fw_version)
-        self.BATTERY_PROFILES = pijuice.config.batteryProfiles + ["CUSTOM", "DEFAULT"]
+        self.BATTERY_PROFILES = service.get_battery_profiles() + ["CUSTOM", "DEFAULT"]
         self.refresh()
 
     def main(self, *args):
-        global current_fw_version
         elements = [
             urwid.Text("Battery settings"),
             urwid.Divider(),
@@ -1727,7 +1405,7 @@ class BatteryProfileTab(object):
                 "NTC resistance [ohm]:     ", default=self.profile_data["ntcResistance"]
             ),
         ]
-        if current_fw_version >= 0x13:
+        if _fw() >= 0x13:
             self.param_edits += [
                 urwid.IntEdit(
                     "OCV10 [mV]:               ", default=self.ext_profile_data["ocv10"]
@@ -1790,7 +1468,7 @@ class BatteryProfileTab(object):
                     urwid.Padding(attrmap(edit), width=32),
                 ]
         else:
-            if current_fw_version >= 0x13:
+            if _fw() >= 0x13:
                 elements += [
                     urwid.Text(
                         "Chemistry:                "
@@ -1837,7 +1515,7 @@ class BatteryProfileTab(object):
                     + str(self.profile_data["ntcResistance"])
                 ),
             ]
-            if current_fw_version >= 0x13:
+            if _fw() >= 0x13:
                 elements += [
                     urwid.Text(
                         "OCV10 [mV]:               "
@@ -1879,7 +1557,7 @@ class BatteryProfileTab(object):
                 urwid.Divider(),
             ]
         )
-        if current_fw_version >= 0x13:
+        if _fw() >= 0x13:
             elements.extend(
                 [
                     urwid.Padding(
@@ -1918,109 +1596,37 @@ class BatteryProfileTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def refresh(self, *args):
-        global current_fw_version
         self._read_profile_status()
-        self._read_profile_data()
-        self._read_temp_sense()
-        if current_fw_version >= 0x13:
-            self._read_rsoc_estimation()
-            self._read_chemistry()
+        self.profile_data = service.get_battery_profile()
+        self.temp_sense_profile_idx = self.TEMP_SENSE_OPTIONS.index(service.get_battery_temp_sense())
+        if _fw() >= 0x13:
+            self.ext_profile_data = service.get_battery_ext_profile()
+            self.rsoc_estimation_profile_idx = self.RSOC_ESTIMATION_OPTIONS.index(service.get_rsoc_estimation())
+            self.chemistries_idx = self.CHEMISTRY_OPTIONS.index(self.ext_profile_data["chemistry"])
         self.main()
-
-    def _read_profile_data(self, *args):
-        global current_fw_version
-        config = pijuice.config.GetBatteryProfile()
-        if config["error"] == "NO_ERROR":
-            self.profile_data = config["data"]
-        else:
-            confirmation_dialog(
-                "Unable to read battery data. Error: {}".format(config["error"]),
-                next=main_menu,
-                single_option=True,
-            )
-        if current_fw_version >= 0x13:
-            extconfig = pijuice.config.GetBatteryExtProfile()
-            if extconfig["error"] == "NO_ERROR":
-                self.ext_profile_data = extconfig["data"]
-            else:
-                confirmation_dialog(
-                    "Unable to read battery data. Error: {}".format(extconfig["error"]),
-                    next=main_menu,
-                    single_option=True,
-                )
 
     def _read_profile_status(self, *args):
         self.profile_name = "CUSTOM"
         self.status_text = ""
-        status = pijuice.config.GetBatteryProfileStatus()
-        if status["error"] == "NO_ERROR":
-            self.profile_status = status["data"]
-
-            if self.profile_status["validity"] == "VALID":
-                if self.profile_status["origin"] == "PREDEFINED":
-                    self.profile_name = self.profile_status["profile"]
-            else:
-                self.status_text = "Invalid battery profile"
-                return
-
-            if (
-                self.profile_status["source"] == "DIP_SWITCH"
-                and self.profile_status["origin"] == "PREDEFINED"
-                and self.BATTERY_PROFILES.index(self.profile_name) == 1
-            ):
-                self.status_text = "Default profile"
-            else:
-                self.status_text = (
-                    "Custom profile by: "
-                    if self.profile_status["origin"] == "CUSTOM"
-                    else "Profile selected by: "
-                )
-                self.status_text += self.profile_status["source"]
+        self.profile_status = service.get_battery_profile_status()
+        if self.profile_status["validity"] != "VALID":
+            self.status_text = "Invalid battery profile"
+            return
+        if self.profile_status["origin"] == "PREDEFINED":
+            self.profile_name = self.profile_status["profile"]
+        if (
+            self.profile_status["source"] == "DIP_SWITCH"
+            and self.profile_status["origin"] == "PREDEFINED"
+            and self.BATTERY_PROFILES.index(self.profile_name) == 1
+        ):
+            self.status_text = "Default profile"
         else:
-            confirmation_dialog(
-                "Unable to read battery data. Error: {}".format(status["error"]),
-                next=main_menu,
-                single_option=True,
+            self.status_text = (
+                "Custom profile by: "
+                if self.profile_status["origin"] == "CUSTOM"
+                else "Profile selected by: "
             )
-
-    def _read_temp_sense(self, *args):
-        temp_sense_config = pijuice.config.GetBatteryTempSenseConfig()
-        if temp_sense_config["error"] == "NO_ERROR":
-            self.temp_sense_profile_idx = self.TEMP_SENSE_OPTIONS.index(
-                temp_sense_config["data"]
-            )
-        else:
-            confirmation_dialog(
-                "Unable to read battery data. Error: {}".format(
-                    temp_sense_config["error"]
-                ),
-                next=main_menu,
-                single_option=True,
-            )
-
-    def _read_rsoc_estimation(self, *args):
-        rsoc_estimation_config = pijuice.config.GetRsocEstimationConfig()
-        if rsoc_estimation_config["error"] == "NO_ERROR":
-            self.rsoc_estimation_profile_idx = self.RSOC_ESTIMATION_OPTIONS.index(
-                rsoc_estimation_config["data"]
-            )
-        else:
-            confirmation_dialog(
-                "Unable to read battery data. Error: {}".format(
-                    rsoc_estimation_config["error"]
-                ),
-                next=main_menu,
-                single_option=True,
-            )
-
-    def _read_chemistry(self, *args):
-        self.chemistries_idx = self.CHEMISTRY_OPTIONS.index(
-            self.ext_profile_data["chemistry"]
-        )
-
-    def _clear_text_edits(self, *args):
-        for edit in self.param_edits:
-            edit.set_edit_text("")
+            self.status_text += self.profile_status["source"]
 
     def _toggle_custom_values(self, *args):
         self.custom_values ^= True
@@ -2121,49 +1727,23 @@ class BatteryProfileTab(object):
         self.main()
 
     def _apply_settings(self, *args):
+        # Validate everything before the first device write; a failed write
+        # raises and stops here, so a bad profile is never written after it.
         if self.custom_values:
-            self._validated_custom_values()  # Validate all fields before the first device write.
-
-        status = pijuice.config.SetBatteryTempSenseConfig(
-            self.TEMP_SENSE_OPTIONS[self.temp_sense_profile_idx]
-        )
-        if status["error"] != "NO_ERROR":
-            confirmation_dialog(
-                "Failed to apply temperature sense options. Error: {}".format(
-                    status["error"]
-                ),
-                next=main_menu,
-                single_option=True,
-            )
-
-        status = pijuice.config.SetRsocEstimationConfig(
-            self.RSOC_ESTIMATION_OPTIONS[self.rsoc_estimation_profile_idx]
-        )
-        if status["error"] != "NO_ERROR":
-            confirmation_dialog(
-                "Failed to apply rsoc estimation options. Error: {}".format(
-                    status["error"]
-                ),
-                next=main_menu,
-                single_option=True,
-            )
-
+            profile, extension = self._validated_custom_values()
+        service.set_battery_temp_sense(self.TEMP_SENSE_OPTIONS[self.temp_sense_profile_idx])
+        if _fw() >= 0x13:
+            service.set_rsoc_estimation(self.RSOC_ESTIMATION_OPTIONS[self.rsoc_estimation_profile_idx])
         if self.custom_values:
-            status = self.write_custom_values()
+            service.set_custom_battery_profile(profile)
+            if extension is not None:
+                service.set_custom_battery_ext_profile(extension)
             self.custom_values = False
         else:
-            status = pijuice.config.SetBatteryProfile(self.profile_name)
-
-        if status["error"] != "NO_ERROR":
-            confirmation_dialog(
-                "Failed to apply profile options. Error: {}".format(status["error"]),
-                next=main_menu,
-                single_option=True,
-            )
-        else:
-            confirmation_dialog(
-                "Settings successfully updated", single_option=True, next=self.refresh
-            )
+            service.set_battery_profile(self.profile_name)
+        confirmation_dialog(
+            "Settings successfully updated", single_option=True, next=self.refresh
+        )
 
     def _validated_custom_values(self):
         ranges = [(1, 4194175), (550, 2500), (50, 400), (3500, 4440), (0, 5100),
@@ -2185,7 +1765,7 @@ class BatteryProfileTab(object):
         if profile["cutoffVoltage"] >= profile["regulationVoltage"]:
             raise ValueError("Cutoff voltage must be below regulation voltage.")
         extension = None
-        if current_fw_version >= 0x13:
+        if _fw() >= 0x13:
             extension = {"chemistry": self.CHEMISTRY_OPTIONS[self.chemistries_idx]}
             for key, edit in zip(self.EDIT_EXTKEYS, self.param_edits[11:]):
                 kind, lo, hi = ("float", 0, 655.35) if key.startswith("r") else ("int", 1, 65535)
@@ -2194,132 +1774,65 @@ class BatteryProfileTab(object):
                 raise ValueError("Open-circuit voltages must increase from 10% to 90% charge.")
         return profile, extension
 
-    def write_custom_values(self, *args):
-        profile, extension = self._validated_custom_values()
-        status = pijuice.config.SetCustomBatteryProfile(profile)
-        if status["error"] != "NO_ERROR" or extension is None:
-            return status
-        return pijuice.config.SetCustomBatteryExtProfile(extension)
-
 
 class WakeupAlarmTab(object):
     def __init__(self, *args):
-        try:
-            self.current_config = self._get_alarm()
-        except Exception as e:
-            confirmation_dialog(
-                "Unable to connect to device: {}".format(str(e)),
-                next=main_menu,
-                single_option=True,
-            )
-        else:
-            self.status = "OK"
-            self.device_time = self._get_device_time()
-            self.main()
+        self.current_config = self._get_alarm()
+        self.status = "OK"
+        self.device_time = self._get_device_time()
+        self.main()
 
     def _get_alarm(self, *args):
-        status = {unit: {} for unit in ("day", "hour", "minute", "second")}
-        # Empty by default
-        for unit in ("day", "hour", "minute", "second"):
-            status[unit]["value"] = ""
-
-        ctr = pijuice.rtcAlarm.GetControlStatus()
-        if ctr["error"] != "NO_ERROR":
-            raise Exception(ctr["error"])
-        status["enabled"] = ctr["data"]["alarm_wakeup_enabled"]
-
-        alarm = pijuice.rtcAlarm.GetAlarm()
-        if alarm["error"] != "NO_ERROR":
-            raise Exception(alarm["error"])
-
-        alarm = alarm["data"]
-
-        if "day" in alarm:
-            status["day"]["type"] = 0  # Day number
-            if alarm["day"] == "EVERY_DAY":
-                status["day"]["every_day"] = True
-            else:
-                status["day"]["every_day"] = False
-                status["day"]["value"] = alarm["day"]
-        elif "weekday" in alarm:
-            status["day"]["type"] = 1  # Day of week number
-            if alarm["weekday"] == "EVERY_DAY":
-                status["day"]["every_day"] = True
-            else:
-                status["day"]["every_day"] = False
-                status["day"]["value"] = alarm["weekday"]
-
-        if "hour" in alarm:
-            if alarm["hour"] == "EVERY_HOUR":
-                status["hour"]["every_hour"] = True
-            else:
-                status["hour"]["every_hour"] = False
-                status["hour"]["value"] = alarm["hour"]
-
-        if "minute" in alarm:
-            status["minute"]["type"] = 0  # Minute
-            status["minute"]["value"] = alarm["minute"]
-        elif "minute_period" in alarm:
-            status["minute"]["type"] = 1  # Minute period
-            status["minute"]["value"] = alarm["minute_period"]
-
-        if "second" in alarm:
-            status["second"]["value"] = alarm["second"]
-
-        return status
+        enabled = service.get_alarm_control()["alarm_wakeup_enabled"]
+        f = alarm_fields(service.get_alarm())
+        return {"enabled": enabled,
+                "day": {"type": f["day_type"], "every_day": f["every_day"], "value": f["day"]},
+                "hour": {"every_hour": f["every_hour"], "value": f["hour"]},
+                "minute": {"type": f["minute_type"], "value": f["minute"]},
+                "second": {"value": f["second"]}}
 
     def _get_device_time(self, *args):
-        device_time = ""
-        t = pijuice.rtcAlarm.GetTime()
-        if t["error"] == "NO_ERROR":
-            t = t["data"]
+        try:
+            t = service.get_rtc_time()
             dt = datetime.datetime(
                 t["year"], t["month"], t["day"], t["hour"], t["minute"], t["second"], tzinfo=datetime.timezone.utc
             )
-            dt_fmt = "%a %Y-%m-%d %H:%M:%S"
-            device_time = dt.strftime(dt_fmt) + " UTC\nLocal: " + dt.astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
-        else:
-            device_time = t["error"]
-
-        s = pijuice.rtcAlarm.GetControlStatus()
-        if s["error"] == "NO_ERROR" and s["data"]["alarm_flag"] and isinstance(t, dict) and "hour" in t:
-            self.status = "Last: {}:{}:{}".format(
-                str(t["hour"]).rjust(2, "0"),
-                str(t["minute"]).rjust(2, "0"),
-                str(t["second"]).rjust(2, "0"),
-            )
-        return device_time
+            if service.get_alarm_control().get("alarm_flag"):
+                self.status = "Last: %02d:%02d:%02d" % (t["hour"], t["minute"], t["second"])
+        except (PiJuiceError, KeyError, TypeError, ValueError) as exc:
+            return "RTC unavailable: %s" % exc
+        return dt.strftime("%a %Y-%m-%d %H:%M:%S") + " UTC\nLocal: " + dt.astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
 
     def _update_time(self, *args):
-        if _active_tab is not self or _in_dialog:
+        if _active_tab is not self:
             return
-        self.device_time = self._get_device_time()
-        self.time_text.set_text(self.device_time)
-        self.status_text.set_text("Status: " + self.status)
+        if not _in_dialog:  # keep ticking behind a dialog; just don't redraw under it
+            self.device_time = self._get_device_time()
+            self.time_text.set_text(self.device_time)
+            self.status_text.set_text("Status: " + self.status)
         self.alarm_handle = loop.set_alarm_in(1, self._update_time)
 
     def _set_alarm(self, *args):
         c = self.current_config
-        alarm = {"second": int(validate_value(c["second"]["value"], "int", 0, 59, None))}
+        alarm = {"second": validate_number(c["second"]["value"], "int", 0, 59)}
         period = c["minute"].get("type") == 1
-        alarm["minute_period" if period else "minute"] = int(validate_value(
-            c["minute"]["value"], "int", 1 if period else 0, 60 if period else 59, None))
+        alarm["minute_period" if period else "minute"] = validate_number(
+            c["minute"]["value"], "int", 1 if period else 0, 60 if period else 59)
         alarm["hour"] = "EVERY_HOUR" if c["hour"].get("every_hour") else schedule_values(c["hour"]["value"], 0, 23, hours=True)
         weekday = c["day"].get("type") == 1
         alarm["weekday" if weekday else "day"] = ("EVERY_DAY" if c["day"].get("every_day") else
-            schedule_values(c["day"]["value"], 1, 7) if weekday else int(validate_value(c["day"]["value"], "int", 1, 31, None)))
-        status = pijuice.rtcAlarm.SetAlarm(alarm)
-        if status.get("error") != "NO_ERROR":
-            raise ValueError("Alarm was not saved: " + status.get("error", "Unknown error"))
+            schedule_values(c["day"]["value"], 1, 7) if weekday else validate_number(c["day"]["value"], "int", 1, 31))
+        service.set_alarm(alarm)
         _saved_draft()
         _flash("Schedule saved. Wakeup enablement is unchanged.", "ok")
 
     def _toggle_wakeup(self, checkbox, state, *args):
         previous = self.current_config["enabled"]
-        ret = pijuice.rtcAlarm.SetWakeupEnabled(state)
-        if ret.get("error") != "NO_ERROR":
+        try:
+            service.set_wakeup_enabled(state)
+        except PiJuiceError as exc:
             checkbox.set_state(previous, do_callback=False)
-            _flash("Wakeup unchanged: " + ret.get("error", "Unknown error"), "error")
+            _flash("Wakeup unchanged: %s" % exc, "error")
             return
         self.current_config["enabled"] = state
         if isinstance(_baseline, dict):
@@ -2327,12 +1840,7 @@ class WakeupAlarmTab(object):
         _flash("Wakeup " + ("enabled." if state else "disabled."), "ok")
 
     def _set_time(self, *args):
-        t = datetime.datetime.now(datetime.timezone.utc)
-        fields = {key: getattr(t, key) for key in ("second", "minute", "hour", "day", "month", "year")}
-        fields.update(weekday=(t.weekday() + 1) % 7 + 1, subsecond=0)
-        result = pijuice.rtcAlarm.SetTime(fields)
-        if result.get("error") != "NO_ERROR":
-            raise ValueError("Could not set RTC: " + result.get("error", "Unknown error"))
+        service.set_rtc_time(rtc_fields_now())
         self.time_text.set_text(self._get_device_time())
         _flash("RTC synchronised with the Pi.", "ok")
 
@@ -2503,9 +2011,6 @@ class WakeupAlarmTab(object):
 
 class SystemTaskTab(object):
     def __init__(self, *args):
-        global pijuiceConfigData
-        if pijuiceConfigData == None:
-            pijuiceConfigData = loadPiJuiceConfig()
         self.main()
 
     def main(self, *args):
@@ -2540,11 +2045,11 @@ class SystemTaskTab(object):
         self.wdenabled = pijuiceConfigData["system_task"]["watchdog"]["enabled"]
         if not ("period" in pijuiceConfigData["system_task"]["watchdog"]):
             pijuiceConfigData["system_task"]["watchdog"]["period"] = 4
-        if current_fw_version >= 0x15:
-            ret = pijuice.power.GetWatchdog()
-            self.watchdogRestoreEn = False
-            if ret["error"] == "NO_ERROR":
-                self.watchdogRestoreEn = ret["non_volatile"]
+        if _fw() >= 0x15:
+            try:
+                _minutes, self.watchdogRestoreEn = service.get_watchdog()
+            except PiJuiceError:
+                self.watchdogRestoreEn = False
         wdCheckBox = attrmap(
             urwid.CheckBox(
                 "Watchdog", state=self.wdenabled, on_state_change=self._toggle_wdenabled
@@ -2563,7 +2068,7 @@ class SystemTaskTab(object):
             )
         )
         wdperiodItem = wdperiodEditItem if self.wdenabled else wdperiodTextItem
-        if current_fw_version >= 0x15:
+        if _fw() >= 0x15:
             wdRestoreCheckBox = attrmap(
                 urwid.CheckBox(
                     "Restore",
@@ -2595,14 +2100,13 @@ class SystemTaskTab(object):
             "trigger_level"
         ]
 
-        if current_fw_version >= 0x15:
-            ret = pijuice.power.GetWakeUpOnCharge()
-            self.wakeupRestoreEn = False
-
-            if ret["error"] == "NO_ERROR":
-                self.wakeupRestoreEn = ret["non_volatile"]
+        if _fw() >= 0x15:
+            try:
+                level, self.wakeupRestoreEn = service.get_wakeup_on_charge()
                 if self.wakeupRestoreEn:
-                    self.wkupOnChargeLevel = ret["data"]
+                    self.wkupOnChargeLevel = level
+            except PiJuiceError:
+                self.wakeupRestoreEn = False
 
         wkupCheckBox = attrmap(
             urwid.CheckBox(
@@ -2622,7 +2126,7 @@ class SystemTaskTab(object):
         )
         wkuplevelItem = wkuplevelEditItem if self.wkupenabled else wkuplevelTextItem
 
-        if current_fw_version >= 0x15:
+        if _fw() >= 0x15:
             wkupRestoreCheckBox = attrmap(
                 urwid.CheckBox(
                     "Restore",
@@ -2768,17 +2272,14 @@ class SystemTaskTab(object):
         self.main()
 
     def _toggle_wdrestore(self, *args):
-        global pijuiceConfigData
-        if self.watchdogRestoreEn:
-            ret = pijuice.power.SetWatchdog(0, True)
-            if ret["error"] == "NO_ERROR":
-                self.watchdogRestoreEn = False
+        if _errors:
+            _flash(next(iter(_errors.values())), "error")
+        elif self.watchdogRestoreEn:
+            service.set_watchdog(0, True)
+            self.watchdogRestoreEn = False
         elif pijuiceConfigData["system_task"]["watchdog"]["enabled"]:
-            ret = pijuice.power.SetWatchdog(
-                pijuiceConfigData["system_task"]["watchdog"]["period"], True
-            )
-            if ret["error"] == "NO_ERROR":
-                self.watchdogRestoreEn = True
+            service.set_watchdog(pijuiceConfigData["system_task"]["watchdog"]["period"], True)
+            self.watchdogRestoreEn = True
         self.main()
 
     def _toggle_wkupenabled(self, *args):
@@ -2790,18 +2291,14 @@ class SystemTaskTab(object):
         self.main()
 
     def _toggle_wkuprestore(self, *args):
-        global pijuiceConfigData
-        if self.wakeupRestoreEn:
-            ret = pijuice.power.SetWakeUpOnCharge("DISABLED", True)
-            if ret["error"] == "NO_ERROR":
-                self.wakeupRestoreEn = False
+        if _errors:
+            _flash(next(iter(_errors.values())), "error")
+        elif self.wakeupRestoreEn:
+            service.set_wakeup_on_charge("DISABLED", True)
+            self.wakeupRestoreEn = False
         else:
-            ret = pijuice.power.SetWakeUpOnCharge(
-                pijuiceConfigData["system_task"]["wakeup_on_charge"]["trigger_level"],
-                True,
-            )
-            if ret["error"] == "NO_ERROR":
-                self.wakeupRestoreEn = True
+            service.set_wakeup_on_charge(pijuiceConfigData["system_task"]["wakeup_on_charge"]["trigger_level"], True)
+            self.wakeupRestoreEn = True
         self.main()
 
     def _toggle_minchgenabled(self, *args):
@@ -2873,8 +2370,6 @@ class SystemEventsTab(object):
 
     def __init__(self, *args):
         global pijuiceConfigData
-        if pijuiceConfigData == None:
-            pijuiceConfigData = loadPiJuiceConfig()
         if not ("system_events" in pijuiceConfigData):
             pijuiceConfigData["system_events"] = {}
         for event in self.EVENTS:
@@ -3067,8 +2562,6 @@ USER_FUNCS_TOTAL = 15
 class UserScriptsTab(object):
     def __init__(self, *args):
         global pijuiceConfigData
-        if pijuiceConfigData == None:
-            pijuiceConfigData = loadPiJuiceConfig()
         if not ("user_functions" in pijuiceConfigData):
             pijuiceConfigData["user_functions"] = {}
         for i in range(USER_FUNCS_TOTAL):
@@ -3139,11 +2632,11 @@ class UserScriptsTab(object):
 
 class BatteryCareTab:
     def __init__(self):
-        self.current_config = charge_policy(loadPiJuiceConfig().get("battery_management", {}))
+        self.current_config = service.get_charge_policy()
         self.main()
 
     def main(self, *_args):
-        report = battery_report(pijuice)
+        report = service.get_battery_report()
         profile = report.get("profile") or {}
         if not isinstance(profile, dict):
             profile = {}
@@ -3168,38 +2661,28 @@ class BatteryCareTab:
 
     def _reset_history(self, _button, confirmed):
         if confirmed:
-            import uuid
-            config = loadPiJuiceConfig()
-            config["battery_tracking"] = {"reset_token": str(uuid.uuid4())}
-            _service_save_config(config, PiJuiceConfigDataPath)
-            retry_service_reload()
+            _report_saved(service.reset_battery_history())
         self.main()
 
     def _toggle_limit(self, checkbox, state):
         policy = {"enabled": state, "limit": 80, "resume": 75}
         try:
-            config = loadPiJuiceConfig()
-            config["battery_management"] = charge_policy(policy)
-            _service_save_config(config, PiJuiceConfigDataPath)
-        except Exception as exc:
+            rc = service.set_charge_policy(policy)
+        except (OSError, ValueError) as exc:
             checkbox.set_state(self.current_config["enabled"], do_callback=False)
             _flash("Could not save charge limit: %s" % exc, "error")
             return
         self.current_config = policy
         pijuiceConfigData["battery_management"] = policy.copy()
         _saved_draft()
-        retry_service_reload()
+        _report_saved(rc)
 
 
 class SettingsTab(object):
     def __init__(self, *args):
-        global pijuiceConfigData
-        if pijuiceConfigData is None:
-            pijuiceConfigData = loadPiJuiceConfig()
         self.main()
 
     def main(self, *args):
-        global pijuiceConfigData
         cli = pijuiceConfigData.setdefault("cli_settings", {})
         elements = [
             urwid.Text("Settings"),
@@ -3269,26 +2752,6 @@ class CyclingListBox(urwid.ListBox):
                 return
 
 
-def schedule_values(text, lo, hi, hours=False):
-    values = []
-    for token in str(text).upper().split(";"):
-        token = token.strip()
-        if hours and token.endswith(("AM", "PM")):
-            hour = int(validate_value(token[:-2].strip(), "int", 1, 12, None))
-            value = hour % 12 + (12 if token.endswith("PM") else 0)
-        else:
-            value = int(validate_value(token, "int", lo, hi, None))
-        values.append(value)
-    return values[0] if len(values) == 1 else ";".join(str(v) for v in sorted(set(values)))
-
-
-def readable(value):
-    aliases = {"PRESENT": "Connected", "NOT_PRESENT": "Not connected", "NORMAL": "On battery",
-               "CHARGING_FROM_IN": "Charging via USB", "CHARGING_FROM_5V_IO": "Charging via GPIO",
-               "NO_FUNC": "No action", "USER_LED": "Custom colour", "CHARGE_STATUS": "Charge status"}
-    return aliases.get(value, str(value).replace("_", " ").capitalize())
-
-
 MENU_HELP = {
     "Status": "Live battery, power and health", "General": "Power inputs and board settings",
     "Buttons": "Press and hold actions", "LEDs": "Charge indicators and custom colours",
@@ -3300,7 +2763,7 @@ MENU_HELP = {
 }
 
 
-def menu(title, choices):
+def menu(choices):
     body = [urwid.Text(("muted", "Choose a section. Drafts stay here until you apply or discard them.")), urwid.Divider()]
     for choice in choices:
         if choice:
@@ -3328,8 +2791,8 @@ def item_chosen(choice, button=None):
             _active_tab.main()
             _dirty = True
         else:
-            if choice not in ("User Scripts", "Settings", "System Events"):
-                _InitPiJuiceInterface()
+            if choice not in ("User Scripts", "Settings", "System Events") and not service.available:
+                service.connect()
             _active_tab = menu_mapping[choice]()
             _baseline = _snapshot()
             _dirty = False
@@ -3347,8 +2810,8 @@ def main_menu(*args):
     _active_tab = None
     _dirty = False
     _errors = {}
-    _location = "Settings"
-    m = menu("PiJuice HAT Configuration", choices)
+    _location = "PiJuice HAT Configuration"
+    m = menu(choices)
     if _last_choice is not None:  # land on the item we came from
         for i, w in enumerate(m.body):
             if any(isinstance(b, urwid.Button) and b.label == _last_choice for b in _walk_widgets(w)):
@@ -3390,44 +2853,36 @@ def savePiJuiceConfig(*args):
     if not section:
         _flash("Open a settings section before saving.", "warning")
         return
+    value = copy.deepcopy(pijuiceConfigData.get(section, {}))
     try:
-        config = loadPiJuiceConfig()
-        config[section] = copy.deepcopy(pijuiceConfigData.get(section, {}))
         if section == "user_functions":
-            for key, value in config[section].items():
-                if value and (not os.path.isabs(value) or not os.path.isfile(value)):
+            for key, path in value.items():
+                if path and (not os.path.isabs(path) or not os.path.isfile(path)):
                     raise ValueError("%s: choose an existing script using its full path." % key)
-        _service_save_config(config, PiJuiceConfigDataPath)
+        rc = service.save_section(section, value)
     except Exception as exc:
         _flash("Could not save: %s. Your edits are kept; retry with F5." % exc, "error")
         return
     _saved_draft()
-    retry_service_reload()
+    _report_saved(rc)
+
+
+def _report_saved(rc):
+    _flash("Settings saved." if rc == 0 else "Saved, but the service did not reload. F8 retries the reload.",
+           "ok" if rc == 0 else "warning")
 
 
 def retry_service_reload(*args):
-    try:
-        result = notify_service()
-    except Exception:
-        result = -1
-    _flash("Settings saved." if result == 0 else "Saved, but the service did not reload. F8 retries the reload.",
-           "ok" if result == 0 else "warning")
+    _report_saved(service.retry_notify())
 
 
 def save_cli_config_quiet():
     try:
-        config = loadPiJuiceConfig()
-        config["cli_settings"] = copy.deepcopy(pijuiceConfigData.get("cli_settings", {}))
-        _service_save_config(config, PiJuiceConfigDataPath)
+        service.save_section("cli_settings", copy.deepcopy(pijuiceConfigData.get("cli_settings", {})))
         return True
     except Exception as exc:
         _flash("Could not save terminal preference: %s" % exc, "error")
         return False
-
-
-def notify_service(*args):
-    # Delegate to the shared, shell-free SIGHUP notifier (no os.system).
-    return _service_notify_service(PID_FILE)
 
 
 menu_mapping = {
@@ -3590,49 +3045,28 @@ def _mark_dirty(*args):
 
 def _focus_is_editable(widget):
     """Descend the focus chain; True if the focused leaf is a text Edit."""
-    seen = set()
-    for _ in range(50):
+    for _ in range(50):  # bounded: a decoration may hand back itself
         if isinstance(widget, urwid.Edit):
             return True
-        if id(widget) in seen:
-            break
-        seen.add(id(widget))
-        child = None
-        for attr in ("focus", "original_widget"):
-            candidate = getattr(widget, attr, None)
-            if candidate is not None and candidate is not widget:
-                child = candidate
-                break
-        if child is None:
-            break
+        child = getattr(widget, "focus", None) or getattr(widget, "original_widget", None)
+        if child is None or child is widget:
+            return False
         widget = child
     return False
 
 
-def _rows_container(widget):
-    """Unwrap decorations until a Pile/ListBox; return (kind, row-list)."""
-    seen = set()
-    while widget is not None and id(widget) not in seen:
-        seen.add(id(widget))
-        if isinstance(widget, urwid.Pile):
-            return "pile", widget.contents
-        if isinstance(widget, urwid.ListBox):
-            return "walker", widget.body
-        widget = getattr(widget, "original_widget", None)
-    return None, None
-
-
 def _hoist_back(widget):
     """Remove the Back/Cancel row from a freshly built view and return its button,
-    so the frame can drive it from the header / nav keys instead of the body."""
-    kind, rows = _rows_container(widget)
-    if rows is None:
+    so the frame can drive it from the header / nav keys instead of the body.
+    _ContentArea already turned any Filler(Pile) into a ListBox."""
+    while widget is not None and not isinstance(widget, urwid.ListBox):
+        widget = getattr(widget, "original_widget", None)
+    if widget is None:
         return None
-    for i, entry in enumerate(rows):
-        row = entry[0] if kind == "pile" else entry
+    for i, row in enumerate(widget.body):
         leaf = getattr(row, "base_widget", row)
         if isinstance(leaf, urwid.Button) and leaf.label in ("Back", "Cancel"):
-            del rows[i]
+            del widget.body[i]
             return leaf
     return None
 
@@ -3702,11 +3136,6 @@ def go_back(*args):
     """Back within a section preserves its draft; returning to the menu caches it."""
     if _current_back is not None:
         urwid.emit_signal(_current_back, "click", _current_back)
-
-
-def _do_back(btn):
-    if btn is not None:
-        urwid.emit_signal(btn, "click", btn)
 
 
 def _back_or_exit(*args):
@@ -3793,13 +3222,12 @@ def input_filter(keys, raw):
         if want_insert:
             _update_title()
         out.extend(mapped)
-    if loop:
-        def track(_loop, _data):
-            global _dirty
-            if _active_tab is not None and not _in_dialog:
-                _dirty = _snapshot() != _baseline or bool(_errors)
-                _render_header()
-        loop.set_alarm_in(0, track)
+    def track(_loop, _data):
+        global _dirty
+        if _active_tab is not None and not _in_dialog:
+            _dirty = _snapshot() != _baseline or bool(_errors)
+            _render_header()
+    loop.set_alarm_in(0, track)
     return out
 
 
@@ -3833,15 +3261,14 @@ def _selftest():
     assert vim_translate(["enter"], "normal", False, False)[0] == ["enter"]  # select
     # _hoist_back removes the Back/Cancel row and returns its button.
     bb = ActionButton("Back")
-    pile = urwid.Pile(
-        [urwid.Text("t"), urwid.Divider(), urwid.Padding(attrmap(bb), width=8)]
-    )
-    assert _hoist_back(urwid.Filler(pile)) is bb and len(pile.contents) == 2
+    lb = CyclingListBox(urwid.SimpleFocusListWalker([urwid.Text("t"), urwid.Padding(attrmap(bb), width=8)]))
+    assert _hoist_back(urwid.Padding(lb)) is bb and len(lb.body) == 1
     lb = CyclingListBox(
         urwid.SimpleFocusListWalker([urwid.Text("t"), attrmap(ActionButton("Cancel"))])
     )
     assert isinstance(_hoist_back(lb), urwid.Button) and len(lb.body) == 1
     assert _hoist_back(urwid.Filler(urwid.Pile([urwid.Text("x")]))) is None
+    assert firmware_error(0) is None and firmware_error(255).startswith("I2C_BUS_ACCESS_ERROR")
     print("selftest OK")
 
 
@@ -3880,26 +3307,29 @@ class ResponsiveScreen(urwid.WidgetWrap):
             if key in ("f10", "esc"):
                 exit_program()
             return None
-        return super().keypress(size, key)
+        try:
+            return super().keypress(size, key)
+        except urwid.ExitMainLoop:
+            raise
+        except Exception as exc:  # checkbox/radio callbacks bypass ActionButton
+            _flash("Could not complete the operation: %s. Your edits are kept." % exc, "error")
+            return None
 
 
 def _build_and_run():
-    global main, frame, linebox, loop, pijuiceConfigData, _location
-    nolock = False
-    lock_file = open(LOCK_FILE, "w")
+    global main, frame, linebox, loop, pijuiceConfigData, _location, service
+    problem = None
     try:
+        lock_file = open(LOCK_FILE, "w")  # noqa: F841 - held for the process lifetime
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except IOError:
-        nolock = True
+    except BlockingIOError:
+        problem = "Another instance of PiJuice Settings is already running"
+    except OSError as exc:
+        problem = "Cannot start: %s" % exc
 
-    if nolock:
+    if problem:
         elements = [
-            urwid.Padding(
-                urwid.Text(
-                    "Another instance of PiJuice Settings is already running",
-                    align="center",
-                )
-            ),
+            urwid.Padding(urwid.Text(problem, align="center")),
             urwid.Divider(),
         ]
         elements.append(
@@ -3909,8 +3339,9 @@ def _build_and_run():
         )
         main = _ContentArea(urwid.Filler(urwid.Pile(elements)), left=2, right=2)
     else:
+        service = PiJuiceService(config_path=PiJuiceConfigDataPath, pid_file=PID_FILE, connect=False)
         pijuiceConfigData = loadPiJuiceConfig()
-        main = _ContentArea(menu("PiJuice HAT Configuration", choices), left=2, right=2)
+        main = _ContentArea(menu(choices), left=2, right=2)
         _location = "PiJuice HAT Configuration"
 
     frame = urwid.Frame(body=main)

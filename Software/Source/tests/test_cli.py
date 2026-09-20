@@ -11,6 +11,8 @@ from unittest.mock import Mock, patch
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(SOURCE), str(SOURCE / 'src')]
 import pijuice_cli as cli
+import pijuice_service
+from pijuice_service import PiJuiceService
 import urwid
 
 
@@ -32,9 +34,8 @@ class CliTests(unittest.TestCase):
         cli._last_choice = None
         cli._location = 'Settings'
         cli._notice = ('muted', 'Ready')
-        cli.current_fw_version = 0x16
         cli.frame = cli.linebox = None
-        cli.main = cli._ContentArea(cli.menu('Settings', cli.choices), left=1, right=1)
+        cli.main = cli._ContentArea(cli.menu(cli.choices), left=1, right=1)
         cli.frame = urwid.Frame(cli.main)
         cli.loop = Mock()
         cli.loop.widget = cli.frame
@@ -43,7 +44,7 @@ class CliTests(unittest.TestCase):
         self.config.GetLedConfiguration.return_value = ok({'function': 'CHARGE_STATUS', 'parameter': dict(r=10, g=20, b=30)})
         self.config.SetLedConfiguration.return_value = ok()
         self.config.GetFirmwareVersion.return_value = ok({'version': '1.6'})
-        self.config.GetButtonConfiguration.return_value = ok({event: {'function': 'NO_FUNC', 'parameter': 100} for event in cli.ButtonsTab.EVENTS})
+        self.config.GetButtonConfiguration.return_value = ok({event: {'function': 'NO_FUNC', 'parameter': 100} for event in cli.PiJuiceConfig.buttonEvents})
         self.config.SetButtonConfiguration.return_value = ok()
         self.config.GetIoConfiguration.return_value = ok({'mode': 'NOT_USED', 'pull': 'NOPULL'})
         self.config.SetIoConfiguration.return_value = ok()
@@ -60,12 +61,12 @@ class CliTests(unittest.TestCase):
         status.GetStatus.return_value = ok(dict(battery='CHARGING_FROM_IN',powerInput='PRESENT',powerInput5vIo='NOT_PRESENT'))
         for name,value in [('GetChargeLevel',74),('GetBatteryVoltage',4000),('GetBatteryTemperature',24),('GetFaultStatus',{})]:
             getattr(status,name).return_value = ok(value)
-        cli.pijuice = SimpleNamespace(config=self.config, rtcAlarm=self.rtc, power=power,status=status)
-        self.init_patch = patch.object(cli, '_InitPiJuiceInterface')
-        self.init_patch.start()
+        cli.service = PiJuiceService(config_path=cli.PiJuiceConfigDataPath, connect=False)
+        cli.service.pj = SimpleNamespace(config=self.config, rtcAlarm=self.rtc, power=power, status=status)
+        cli.service.firmware_version = {'version': '1.6'}
 
     def tearDown(self):
-        self.init_patch.stop()
+        cli.service.close()
         self.tmp.cleanup()
 
     def click(self, label):
@@ -103,7 +104,7 @@ class CliTests(unittest.TestCase):
     def test_battery_limit_toggle_saves_only_its_policy(self):
         cli.item_chosen('Battery care')
         checkbox = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w,urwid.CheckBox))
-        with patch.object(cli,'notify_service',return_value=0):
+        with patch.object(pijuice_service,'notify_service',return_value=0):
             checkbox.set_state(True)
         saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
         self.assertEqual(saved['battery_management'], {'enabled':True, 'limit':80, 'resume':75})
@@ -150,7 +151,7 @@ class CliTests(unittest.TestCase):
         edit.set_edit_text('/tmp/not-yet-a-script')
         cli.go_back()
         cli.item_chosen('System Events')
-        with patch.object(cli,'notify_service',return_value=0):
+        with patch.object(pijuice_service,'notify_service',return_value=0):
             cli.savePiJuiceConfig()
         saved=json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
         self.assertEqual(saved['user_functions']['USER_FUNC1'],'')
@@ -162,7 +163,7 @@ class CliTests(unittest.TestCase):
         cli.pijuiceConfigData['system_events']['low_charge']['enabled']=True
         cli._dirty=True
         before=cli.main.original_widget
-        with patch.object(cli,'_service_save_config',side_effect=OSError('full')):
+        with patch.object(pijuice_service,'save_config',side_effect=OSError('full')):
             cli.savePiJuiceConfig()
         self.assertIs(cli.main.original_widget,before)
         self.assertTrue(cli._dirty)
@@ -200,10 +201,10 @@ class CliTests(unittest.TestCase):
 
     def test_service_reload_failure_does_not_lose_saved_state(self):
         cli.item_chosen('System Events')
-        with patch.object(cli,'notify_service',return_value=-1): cli.savePiJuiceConfig()
+        with patch.object(pijuice_service,'notify_service',return_value=-1): cli.savePiJuiceConfig()
         self.assertFalse(cli._dirty)
         self.assertIn('F8',cli._notice[1])
-        with patch.object(cli,'notify_service',return_value=0): cli.retry_service_reload()
+        with patch.object(pijuice_service,'notify_service',return_value=0): cli.retry_service_reload()
         self.assertEqual(cli._notice[0],'ok')
 
     def test_refresh_does_not_overwrite_draft(self):
@@ -212,6 +213,40 @@ class CliTests(unittest.TestCase):
         cli._dirty=True
         self.click('Refresh')
         self.assertEqual(cli.pijuiceConfigData['user_functions']['USER_FUNC1'],'draft')
+
+    def test_profile_apply_stops_at_first_failed_write(self):
+        self.config.GetBatteryProfileStatus.return_value = ok({'validity': 'VALID', 'origin': 'PREDEFINED', 'profile': 'BP7X', 'source': 'HOST'})
+        self.config.GetBatteryProfile.return_value = ok(dict(capacity=1820, chargeCurrent=925, terminationCurrent=50, regulationVoltage=4180, cutoffVoltage=3000, tempCold=0, tempCool=10, tempWarm=45, tempHot=60, ntcB=3380, ntcResistance=10000))
+        self.config.GetBatteryExtProfile.return_value = ok(dict(chemistry='LIPO', ocv10=3600, ocv50=3800, ocv90=4100, r10=.1, r50=.1, r90=.1))
+        self.config.GetBatteryTempSenseConfig.return_value = ok('AUTO_DETECT')
+        self.config.GetRsocEstimationConfig.return_value = ok('AUTO_DETECT')
+        self.config.batteryProfiles = ['BP7X']
+        self.config.SetBatteryTempSenseConfig.return_value = {'error': 'WRITE_FAILED'}
+        cli.item_chosen('Battery profile')
+        self.click('Apply settings')
+        self.assertEqual(cli._notice[0], 'error')
+        self.config.SetBatteryProfile.assert_not_called()
+
+    def test_i2c_address_change_is_persisted(self):
+        self.config.GetRunPinConfig.return_value = ok('NOT_INSTALLED')
+        self.config.GetAddress.side_effect = lambda slave: ok('14' if slave == 1 else '68')
+        self.config.GetIdEepromAddress.return_value = ok('52')
+        self.config.GetIdEepromWriteProtect.return_value = ok(False)
+        self.config.GetPowerInputsConfig.return_value = ok(dict(precedence='5V_GPIO', gpio_in_enabled=True, usb_micro_current_limit='2.5A', usb_micro_dpm='4.20V', no_battery_turn_on=False))
+        self.config.GetPowerRegulatorMode.return_value = ok('POWER_SOURCE_DETECTION')
+        self.config.GetChargingConfig.return_value = ok({'charging_enabled': True})
+        self.config.SetAddress.return_value = ok()
+        cli.item_chosen('General')
+        cli._active_tab.current_config['i2c_addr'] = '15'
+        with patch.object(pijuice_service, 'notify_service', return_value=0):
+            self.click('Apply settings')
+        self.config.SetAddress.assert_called_once_with(1, '15')
+        saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
+        self.assertEqual(saved['board']['general']['i2c_addr'], '15')
+        self.assertEqual(saved['system_task'], self.original['system_task'])
+        cli._active_tab.current_config['i2c_addr'] = 'zz'
+        self.click('Apply settings')
+        self.config.SetAddress.assert_called_once()
 
     def test_quit_can_be_cancelled_with_drafts_intact(self):
         cli.item_chosen('User Scripts')

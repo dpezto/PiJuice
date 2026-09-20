@@ -26,10 +26,11 @@ about neither.
 from pijuice_battery import battery_report, charge_policy
 
 import copy
-import tempfile
 import json
 import os
 import subprocess
+import tempfile
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -45,11 +46,107 @@ ADDRESS_DEFAULT = 0x14
 CONFIG_PATH_DEFAULT = '/var/lib/pijuice/pijuice_config.JSON'
 PID_FILE_DEFAULT = '/run/pijuice/pijuice_sys.pid'
 
-# LED function names. The firmware encodes the function as the *index* into the
-# full list (0..3); the UI historically hid ON_OFF_STATUS from the dropdown.
-# Keep both here so encode/decode can never desync (see set_led_color note).
-LED_FUNCTIONS = ['NOT_USED', 'CHARGE_STATUS', 'ON_OFF_STATUS', 'USER_LED']
+# ON_OFF_STATUS is firmware-driven; the UIs never offer it.
 LED_USER_SELECTABLE = ['NOT_USED', 'CHARGE_STATUS', 'USER_LED']
+
+# pijuiceboot exit codes (returncode = 256 - index).
+FIRMWARE_UPDATE_ERRORS = ['NO_ERROR', 'I2C_BUS_ACCESS_ERROR', 'INPUT_FILE_OPEN_ERROR',
+                          'STARTING_BOOTLOADER_ERROR', 'FIRST_PAGE_ERASE_ERROR', 'EEPROM_ERASE_ERROR',
+                          'INPUT_FILE_READ_ERROR', 'PAGE_WRITE_ERROR', 'PAGE_READ_ERROR',
+                          'PAGE_VERIFY_ERROR', 'CODE_EXECUTE_ERROR']
+FIRMWARE_HINTS = {
+    'I2C_BUS_ACCESS_ERROR': 'Check if I2C bus is enabled.',
+    'INPUT_FILE_OPEN_ERROR': 'Firmware binary file might be missing or damaged.',
+    'STARTING_BOOTLOADER_ERROR': 'Try to start bootloader manually. Press and hold button SW3 '
+                                 'while powering up RPI and PiJuice.',
+}
+
+
+def firmware_error(returncode):
+    """Human-readable reason for a non-zero ``pijuice_boot`` exit, or ``None``."""
+    if returncode == 0:
+        return None
+    index = 256 - returncode
+    reason = FIRMWARE_UPDATE_ERRORS[index] if 0 < index < len(FIRMWARE_UPDATE_ERRORS) else 'UNKNOWN'
+    return (reason + '. ' + FIRMWARE_HINTS.get(reason, '')).strip()
+
+
+def pack_version(text):
+    """``'1.6'`` -> ``0x16`` (the int the library's profile selector wants); 0 if unparsable."""
+    try:
+        major, minor = str(text).split('.')
+        return (int(major) << 4) + int(minor)
+    except (TypeError, ValueError):
+        return 0
+
+
+def version_to_str(number):
+    return '{}.{}'.format(number >> 4, number & 15)
+
+
+def readable(value):
+    """Enum -> label shared by both UIs so wording never drifts."""
+    aliases = {'PRESENT': 'Connected', 'NOT_PRESENT': 'Not connected', 'NORMAL': 'On battery',
+               'CHARGING_FROM_IN': 'Charging via USB', 'CHARGING_FROM_5V_IO': 'Charging via GPIO',
+               'NO_FUNC': 'No action', 'NOT_USED': 'Not used', 'USER_LED': 'Custom colour',
+               'CHARGE_STATUS': 'Charge status', 'ON_OFF_STATUS': 'Power status'}
+    value = str(value)
+    return aliases.get(value, value.replace('_', ' ').capitalize() if '_' in value else value)
+
+
+def validate_number(text, kind, lo, hi):
+    """Parse a complete int/float within [lo, hi]; never clamp silently."""
+    import math
+    try:
+        value = int(text) if kind == 'int' else float(text)
+        if not math.isfinite(value) or (lo is not None and value < lo) or (hi is not None and value > hi):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise ValueError('Enter a %s between %s and %s.' % ('whole number' if kind == 'int' else 'number', lo, hi))
+    return value
+
+
+def schedule_values(text, lo, hi, hours=False):
+    """Alarm field: one value, or several separated by ';' (hours accept AM/PM)."""
+    values = []
+    for token in str(text).upper().split(';'):
+        token = token.strip()
+        if hours and token.endswith(('AM', 'PM')):
+            hour = validate_number(token[:-2].strip(), 'int', 1, 12)
+            values.append(hour % 12 + (12 if token.endswith('PM') else 0))
+        else:
+            values.append(validate_number(token, 'int', lo, hi))
+    return values[0] if len(values) == 1 else ';'.join(str(v) for v in sorted(set(values)))
+
+
+def alarm_fields(alarm):
+    """Flatten the library's alarm dict into the fields both UIs edit."""
+    alarm = alarm or {}
+    fields = {'day_type': 1 if 'weekday' in alarm else 0, 'every_day': False, 'day': '',
+              'every_hour': alarm.get('hour') == 'EVERY_HOUR', 'hour': '',
+              'minute_type': 1 if 'minute_period' in alarm else 0, 'minute': '', 'second': ''}
+    day = alarm.get('weekday', alarm.get('day'))
+    if day == 'EVERY_DAY':
+        fields['every_day'] = True
+    elif day is not None:
+        fields['day'] = str(day)
+    if not fields['every_hour'] and 'hour' in alarm:
+        fields['hour'] = str(alarm['hour'])
+    minute = alarm.get('minute_period', alarm.get('minute'))
+    if minute is not None:
+        fields['minute'] = str(minute)
+    if 'second' in alarm:
+        fields['second'] = str(alarm['second'])
+    return fields
+
+
+def rtc_fields_now():
+    """Current UTC time in the layout ``rtcAlarm.SetTime`` expects."""
+    import datetime
+    t = datetime.datetime.now(datetime.timezone.utc)
+    fields = {key: getattr(t, key) for key in ('second', 'minute', 'hour', 'day', 'month', 'year')}
+    fields.update(weekday=(t.weekday() + 1) % 7 + 1, subsecond=0)
+    return fields
 
 
 class PiJuiceError(Exception):
@@ -186,30 +283,10 @@ class PiJuiceService(object):
         """
         return self._executor.submit(fn, *args, **kwargs)
 
-    def submit_method(self, name, *args, **kwargs):
-        """Convenience: ``submit`` a named service method by string."""
-        return self.submit(getattr(self, name), *args, **kwargs)
-
     def close(self):
         self._executor.shutdown(wait=False)
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        self.close()
-        return False
-
     # ── config / service ─────────────────────────────────────────────────────
-    def reload_config(self):
-        self.config = load_config(self.config_path)
-        return self.config
-
-    def save_and_notify(self):
-        """Persist the in-memory config and SIGHUP the service. Returns notify rc."""
-        save_config(self.config, self.config_path)
-        return notify_service(self.pid_file)
-
     def save_section(self, section, value):
         """Commit one validated form without publishing a failed or partial draft."""
         config = load_config(self.config_path)
@@ -241,10 +318,6 @@ class PiJuiceService(object):
         pj = self._require()
         return _unwrap(pj.status.GetBatteryVoltage(), 'GetBatteryVoltage')
 
-    def get_battery_current(self):
-        pj = self._require()
-        return _unwrap(pj.status.GetBatteryCurrent(), 'GetBatteryCurrent')
-
     def get_battery_temperature(self):
         pj = self._require()
         return _unwrap(pj.status.GetBatteryTemperature(), 'GetBatteryTemperature')
@@ -271,6 +344,64 @@ class PiJuiceService(object):
         return _unwrap(pj.power.SetSystemPowerSwitch(int(milliamps)),
                        'SetSystemPowerSwitch')
 
+    def get_watchdog(self):
+        """``(minutes, non_volatile)``; the library returns them side by side."""
+        ret = self._require().power.GetWatchdog()
+        return _unwrap(ret, 'GetWatchdog'), bool(ret.get('non_volatile'))
+
+    def set_watchdog(self, minutes, non_volatile=False):
+        return _unwrap(self._require().power.SetWatchdog(int(minutes), non_volatile), 'SetWatchdog')
+
+    def get_wakeup_on_charge(self):
+        """``(level_or_'DISABLED', non_volatile)``."""
+        ret = self._require().power.GetWakeUpOnCharge()
+        return _unwrap(ret, 'GetWakeUpOnCharge'), bool(ret.get('non_volatile'))
+
+    def set_wakeup_on_charge(self, level, non_volatile=False):
+        arg = 'DISABLED' if level == 'DISABLED' else int(float(level))
+        return _unwrap(self._require().power.SetWakeUpOnCharge(arg, non_volatile), 'SetWakeUpOnCharge')
+
+    # ── general/board domain (CLI only) ──────────────────────────────────────
+    def get_run_pin(self):
+        return _unwrap(self._require().config.GetRunPinConfig(), 'GetRunPinConfig')
+
+    def set_run_pin(self, config):
+        return _unwrap(self._require().config.SetRunPinConfig(config), 'SetRunPinConfig')
+
+    def get_power_inputs(self):
+        return _unwrap(self._require().config.GetPowerInputsConfig(), 'GetPowerInputsConfig')
+
+    def set_power_inputs(self, config, non_volatile=True):
+        return _unwrap(self._require().config.SetPowerInputsConfig(config, non_volatile),
+                       'SetPowerInputsConfig')
+
+    def get_power_regulator_mode(self):
+        return _unwrap(self._require().config.GetPowerRegulatorMode(), 'GetPowerRegulatorMode')
+
+    def set_power_regulator_mode(self, mode):
+        return _unwrap(self._require().config.SetPowerRegulatorMode(mode), 'SetPowerRegulatorMode')
+
+    def get_id_eeprom_write_protect(self):
+        return _unwrap(self._require().config.GetIdEepromWriteProtect(), 'GetIdEepromWriteProtect')
+
+    def set_id_eeprom_write_protect(self, status):
+        return _unwrap(self._require().config.SetIdEepromWriteProtect(status), 'SetIdEepromWriteProtect')
+
+    def get_id_eeprom_address(self):
+        return _unwrap(self._require().config.GetIdEepromAddress(), 'GetIdEepromAddress')
+
+    def set_id_eeprom_address(self, hex_address):
+        return _unwrap(self._require().config.SetIdEepromAddress(hex_address), 'SetIdEepromAddress')
+
+    def get_address(self, slave):
+        return _unwrap(self._require().config.GetAddress(slave), 'GetAddress')
+
+    def set_address(self, slave, hex_address):
+        return _unwrap(self._require().config.SetAddress(slave, hex_address), 'SetAddress')
+
+    def set_default_configuration(self):
+        return _unwrap(self._require().config.SetDefaultConfiguration(), 'SetDefaultConfiguration')
+
     # ── button domain ────────────────────────────────────────────────────────
     @property
     def buttons(self):
@@ -290,7 +421,7 @@ class PiJuiceService(object):
         return _unwrap(pj.config.SetButtonConfiguration(button, config),
                        'SetButtonConfiguration')
 
-    # ── LED domain (carries the B1a "red disables green" fix) ────────────────
+    # ── LED domain ───────────────────────────────────────────────────────────
     @property
     def leds(self):
         return self._require().config.leds
@@ -305,41 +436,11 @@ class PiJuiceService(object):
         return _unwrap(pj.config.SetLedConfiguration(led, config),
                        'SetLedConfiguration')
 
-    def get_led_state(self, led):
-        pj = self._require()
-        return _unwrap(pj.status.GetLedState(led), 'GetLedState')
-
-    def set_led_color(self, led, rgb, ensure_user_led=True):
-        """Drive *led* to ``rgb`` ([r, g, b], 0-255 each).
-
-        B1a: the reported "turning on red disables green" almost always means the
-        LED's *function* is CHARGE_STATUS, so the firmware keeps re-driving R/G
-        for charge state and stomps on live writes. Direct ``SetLedState`` only
-        sticks when the function is USER_LED. With ``ensure_user_led`` we switch
-        the function to USER_LED first (persisting it), then write the colour.
-        The library already sends R/G/B as three independent bytes, so the
-        channels themselves are never coupled in software.
-        """
-        pj = self._require()
-        rgb = [int(c) & 0xFF for c in rgb]
-        if ensure_user_led:
-            cfg = self.get_led_config(led) or {}
-            if cfg.get('function') != 'USER_LED':
-                self.set_led_config(led, {
-                    'function': 'USER_LED',
-                    'parameter': {'r': rgb[0], 'g': rgb[1], 'b': rgb[2]},
-                })
-        return _unwrap(pj.status.SetLedState(led, rgb), 'SetLedState')
-
     # ── battery domain ───────────────────────────────────────────────────────
     @property
     def fw_int(self):
         """Firmware version as the ``(major << 4) | minor`` int the lib expects."""
-        try:
-            major, minor = self.firmware_version['version'].split('.')
-            return (int(major) << 4) + int(minor)
-        except (TypeError, KeyError, ValueError, AttributeError):
-            return 0
+        return pack_version((self.firmware_version or {}).get('version'))
 
     def get_battery_report(self):
         report = battery_report(self._require())
@@ -347,7 +448,6 @@ class PiJuiceService(object):
         return report
 
     def reset_battery_history(self):
-        import uuid
         return self.save_section('battery_tracking', {'reset_token': str(uuid.uuid4())})
 
     def get_charge_policy(self):
@@ -377,6 +477,19 @@ class PiJuiceService(object):
     def set_battery_profile(self, profile):
         return _unwrap(self._require().config.SetBatteryProfile(profile),
                        'SetBatteryProfile')
+
+    def get_battery_profile(self):
+        return _unwrap(self._require().config.GetBatteryProfile(), 'GetBatteryProfile')
+
+    def set_custom_battery_profile(self, profile):
+        return _unwrap(self._require().config.SetCustomBatteryProfile(profile), 'SetCustomBatteryProfile')
+
+    def get_battery_ext_profile(self):
+        return _unwrap(self._require().config.GetBatteryExtProfile(), 'GetBatteryExtProfile')
+
+    def set_custom_battery_ext_profile(self, profile):
+        return _unwrap(self._require().config.SetCustomBatteryExtProfile(profile),
+                       'SetCustomBatteryExtProfile')
 
     def get_battery_temp_sense(self):
         return _unwrap(self._require().config.GetBatteryTempSenseConfig(),
@@ -444,13 +557,7 @@ class PiJuiceService(object):
         return _unwrap(self._require().rtcAlarm.SetWakeupEnabled(bool(enabled)),
                        'SetWakeupEnabled')
 
-    def clear_alarm_flag(self):
-        return _unwrap(self._require().rtcAlarm.ClearAlarmFlag(), 'ClearAlarmFlag')
-
     # ── firmware domain ──────────────────────────────────────────────────────
-    def get_i2c_address(self):
-        return self._require().config.interface.GetAddress()
-
     def flash_firmware(self, bin_file):
         """Run ``pijuiceboot <addr> <bin_file>``; return its exit code (0 = ok).
 
@@ -459,7 +566,7 @@ class PiJuiceService(object):
         result is enough for a rare, manual operation; add a callback-fed
         progress channel only if the UI needs a bar.
         """
-        addr = self.get_i2c_address()
+        addr = self._require().config.interface.GetAddress()
         if not addr:
             raise PiJuiceError('NO_ADDRESS', 'firmware')
         return subprocess.call(['pijuiceboot', format(addr, 'x'), bin_file])
