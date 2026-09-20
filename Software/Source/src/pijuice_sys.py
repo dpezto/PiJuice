@@ -18,6 +18,7 @@ import time
 import re
 
 from pijuice import PiJuice
+from pijuice_battery import ChargeLimiter, BatteryHistory
 
 pijuice = None
 btConfig = {}
@@ -46,6 +47,37 @@ PID_FILE = '/run/pijuice/pijuice_sys.pid'
 HALT_FILE = '/run/pijuice/pijuice_halt.flag'
 I2C_ADDRESS_DEFAULT = 0x14
 I2C_BUS_DEFAULT = 1
+chargeLimiter = None
+chargeLimitMessage = None
+batteryHistory = None
+batteryHistoryError = None
+
+def _TrackBattery():
+    global batteryHistory, batteryHistoryError
+    try:
+        if batteryHistory is None:
+            batteryHistory = BatteryHistory()
+        batteryHistory.sample(pijuice, configData.get("battery_tracking", {}).get("reset_token"))
+        batteryHistoryError = None
+    except Exception as exc:
+        message = str(exc)
+        if message != batteryHistoryError:
+            print("Battery tracking: " + message, flush=True)
+            batteryHistoryError = message
+
+
+def _EvalChargeLimit(status):
+    global chargeLimiter, chargeLimitMessage
+    if chargeLimiter is None:
+        chargeLimiter = ChargeLimiter()
+    try:
+        message = chargeLimiter.step(pijuice, configData.get('battery_management', {}), status)
+    except Exception as exc:
+        message = 'Charge limiter: ' + str(exc)
+    if message != chargeLimitMessage:
+        print(message, flush=True)
+        chargeLimitMessage = message
+
 
 def _SystemHalt(event):
     if (event in ('low_charge', 'low_battery_voltage', 'no_power')
@@ -285,6 +317,8 @@ def _LoadConfiguration():
 
 def reload_settings(signum=None, frame=None):
     _LoadConfiguration() # Update configuration
+    global _batCapacityMah
+    _batCapacityMah = None
     global watchdogEn
     if watchdogEn: _ConfigureWatchdog('ACTIVATE') # Update watchdog setting
 
@@ -379,6 +413,10 @@ def main():
     signal.signal(signal.SIGHUP, reload_settings)
 
     if len(sys.argv) > 1 and str(sys.argv[1]) == 'stop':
+        try:
+            ChargeLimiter().release(pijuice)
+        except Exception as exc:
+            print('Unable to release charge limit on stop: %s' % exc, flush=True)
 
         if sysStopEvEn:
             ExecuteFunc(configData['system_events']['sys_stop']['function'], 'sys_stop', configData)
@@ -451,7 +489,18 @@ def main():
 
     timeCnt = 2#5
 
+    def stop_tracking(_signum, _frame):
+        global dopoll
+        dopoll = False
+    signal.signal(signal.SIGTERM, stop_tracking)
+    limitTicks = 0
     while dopoll:
+        if limitTicks == 0:
+            _TrackBattery()
+            limitStatus = pijuice.status.GetStatus()
+            if limitStatus.get('error') == 'NO_ERROR':
+                _EvalChargeLimit(limitStatus.get('data'))
+        limitTicks = (limitTicks + 1) % 5
         if configData.get('system_task', {}).get('enabled'):
             ret = pijuice.status.GetStatus()
             if ret['error'] == 'NO_ERROR':
@@ -474,6 +523,9 @@ def main():
             else:
                 print(ret)
         time.sleep(1)
+
+    if batteryHistory is not None:
+        batteryHistory.save()
 
 
 if __name__ == '__main__':

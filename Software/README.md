@@ -142,6 +142,90 @@ You can also right click on this icon to load the configuration menu, instead of
 
 ## PiJuice Settings
 
+The GTK4 app keeps the familiar sidebar sections and follows your desktop theme.
+On narrow windows, use the back arrow to return to the section list.
+
+- **Status** shows live charge, power inputs, and faults. Settings and the tray
+  automatically retry a lost connection without requiring an app restart.
+- Related form edits stay as drafts while you move between sections. **Apply**
+  and **Discard** appear when you change a value; refresh never replaces a draft.
+  Closing with unsaved changes asks whether to discard them.
+- **Charging enabled** and **Wakeup enabled** change immediately. Failed changes
+  restore the switch, and failed form saves retain your edits for retry.
+- Alarm times use **UTC**, with the current local equivalent alongside the RTC.
+  Hours accept 0–23 or AM/PM, and multiple hours or weekdays can be separated
+  by semicolons. Saving a schedule does not automatically enable wakeup.
+- **Preview colour** briefly displays the chosen LED colour and restores the
+  saved configuration. **Apply** saves the new LED settings.
+- Firmware updates show a busy indicator and prevent closing during the write.
+  Power is checked again immediately before flashing. Failed updates offer retry.
+- If settings were saved but the daemon could not reload them, use **Retry
+  service reload**; there is no need to re-enter your settings.
+
+The screenshots and detailed walkthrough below include earlier interface versions.
+
+### Terminal interface and battery care
+
+Run `pijuice_cli`. The terminal UI adapts to the window, with colour for focus,
+primary actions, warnings and errors. Set `NO_COLOR=1` for a monochrome display.
+Use arrows or Tab to navigate, Enter to select, Esc to go back, F5 to apply,
+F6 to discard a section's draft, F8 to retry a service reload, and F10 to quit.
+Returning to the menu keeps drafts; saving a JSON section does not save another
+section's unfinished edits. Numeric errors remain editable and are never silently
+clamped. Custom battery profiles validate representable values before writing.
+
+**Battery care** in the CLI, or **Battery → Battery care** in the desktop app,
+provides an optional **80% charge limit**. It starts off. Enabling it saves the
+policy and asks the background service to reload. The service checks every five
+seconds, pauses charging at or above 80%, and resumes at or below 75%. It does
+not actively discharge a battery already above 80%. The limit works independently
+of the System Task master switch, but requires the Pi and service to be running.
+The charging-enable commands are volatile; battery voltage/current profiles and
+firmware thermal protection remain in force. On service shutdown or disabling the
+limit, the service releases only a pause it owns. A persisted ownership marker
+allows recovery after a service restart. Charging disabled manually before the
+limiter starts is left disabled. While limiting, use Battery care to control the
+policy rather than toggling charging manually.
+
+Battery condition shows reported faults, temperature, configured capacity and
+charging specifications. **Configured capacity is not measured full-charge
+capacity.** This fork also records battery history automatically, independently
+of the System Task switch:
+
+- **Equivalent cycles** add up observed charge depletion: two 50% discharges
+  count as one cycle. Only battery-powered intervals are counted. Gauge jumps,
+  missing readings, and time while the service is stopped are excluded. The
+  displayed start date distinguishes recorded use from lifetime battery age.
+- **Estimated capacity health** learns from an uninterrupted discharge starting
+  at 80% or above and ending at 20%. It integrates GPIO output voltage/current,
+  converts output energy to battery charge using battery voltage and an assumed
+  90% converter efficiency, then extrapolates over the observed charge range.
+  Health is that estimated full capacity divided by the configured capacity.
+  The latest five qualifying sessions are combined using their median. Firmware
+  battery current is deliberately excluded because it can be derived from charge
+  level and configured capacity, which would make the health calculation circular.
+- This is a **rough estimate**, affected by load sensing, converter losses,
+  unmeasured board consumption, temperature, and charge-gauge accuracy. It is not
+  a laboratory capacity measurement. No health percentage is shown before a
+  qualifying session; the UI displays learning progress and the last estimate
+  date. Tracking never forces discharge or changes the charge limit.
+- History is saved atomically once a minute and at graceful shutdown in
+  `/var/lib/pijuice/battery_history.json`. Abrupt power loss can lose up to one
+  minute of observations. Restarting breaks the capacity-learning session but
+  preserves cycle totals and completed estimates. Gaps over 30 seconds do too.
+- Use **New battery / reset tracking…** after replacing a battery, including one
+  of the same model. Changing profile automatically starts a new series. The last
+  ten previous series remain archived in the history file. Confirmation is
+  required for a manual reset; cancelling leaves all readings unchanged.
+
+Profile labels include the exact model and capacity. The catalog comes from the
+installed firmware, including its supported PiJuice LiPo, Zero, BP6X, BP7X and
+SNN5843 variants; it is not expanded with guessed parameters for generic cells.
+Automatic board selection and existing custom profiles are also exposed in the
+GUI. Use the exact model and manufacturer specifications, not capacity alone.
+See the [upstream API documentation](https://github.com/PiSupply/PiJuice/blob/master/Software/README.md)
+and [manufacturer battery setup guide](https://uk.pi-supply.com/blogs/pi-supply-1/how-to-setup-connect-your-pijuice-battery).
+
 ### Main software menu
 
 ![Main software menu, with battery attached](https://user-images.githubusercontent.com/1197294/59568742-2d7e2980-907f-11e9-8e36-c2b32b60f5f1.png "Main software menu, with battery attached")

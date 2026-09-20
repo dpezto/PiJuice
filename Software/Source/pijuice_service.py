@@ -23,6 +23,10 @@ Toolkit independence: :meth:`PiJuiceService.submit` returns a
 about neither.
 """
 
+from pijuice_battery import battery_report, charge_policy
+
+import copy
+import tempfile
 import json
 import os
 import subprocess
@@ -72,8 +76,21 @@ def save_config(data, path=CONFIG_PATH_DEFAULT):
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent)
-    with open(path, 'w+') as fh:
-        json.dump(data, fh, indent=2)
+    fd, temporary = tempfile.mkstemp(prefix='.pijuice-', dir=parent or '.')
+    try:
+        if os.path.exists(path):
+            previous = os.stat(path)
+            # Keep the shared pijuice group so the daemon can read desktop saves.
+            os.fchown(fd, -1, previous.st_gid)
+            os.fchmod(fd, previous.st_mode & 0o777)
+        with os.fdopen(fd, 'w') as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def notify_service(pid_file=PID_FILE_DEFAULT):
@@ -89,8 +106,8 @@ def notify_service(pid_file=PID_FILE_DEFAULT):
         return -1
     # No shell: pid is validated as int, args passed directly to sudo/kill.
     with open(os.devnull, 'wb') as devnull:
-        return subprocess.call(['sudo', 'kill', '-SIGHUP', str(pid)],
-                               stdout=devnull, stderr=devnull)
+        return subprocess.call(['sudo', '-n', 'kill', '-SIGHUP', str(pid)],
+                               stdout=devnull, stderr=devnull, timeout=10)
 
 
 def _unwrap(result, context=''):
@@ -111,7 +128,7 @@ class PiJuiceService(object):
     """Serialised, UI-agnostic facade over :class:`pijuice.PiJuice`."""
 
     def __init__(self, bus=None, address=None, config_path=CONFIG_PATH_DEFAULT,
-                 pid_file=PID_FILE_DEFAULT):
+                 pid_file=PID_FILE_DEFAULT, connect=True):
         self.config_path = config_path
         self.pid_file = pid_file
         self.config = load_config(config_path)
@@ -121,7 +138,8 @@ class PiJuiceService(object):
         self.firmware_version = None
         # Single worker so all I2C transfers are serialised (the bus is shared).
         self._executor = ThreadPoolExecutor(max_workers=1)
-        self.connect()
+        if connect:
+            self.connect()
 
     # ── connection ───────────────────────────────────────────────────────────
     def _resolve_bus_addr(self):
@@ -191,6 +209,20 @@ class PiJuiceService(object):
         """Persist the in-memory config and SIGHUP the service. Returns notify rc."""
         save_config(self.config, self.config_path)
         return notify_service(self.pid_file)
+
+    def save_section(self, section, value):
+        """Commit one validated form without publishing a failed or partial draft."""
+        config = load_config(self.config_path)
+        config[section] = copy.deepcopy(value)
+        save_config(config, self.config_path)
+        self.config = config
+        return self.retry_notify()
+
+    def retry_notify(self):
+        try:
+            return notify_service(self.pid_file)
+        except (OSError, subprocess.TimeoutExpired):
+            return -1
 
     # ── status domain ────────────────────────────────────────────────────────
     def get_firmware_version(self):
@@ -308,6 +340,21 @@ class PiJuiceService(object):
             return (int(major) << 4) + int(minor)
         except (TypeError, KeyError, ValueError, AttributeError):
             return 0
+
+    def get_battery_report(self):
+        report = battery_report(self._require())
+        report['policy'] = self.get_charge_policy()
+        return report
+
+    def reset_battery_history(self):
+        import uuid
+        return self.save_section('battery_tracking', {'reset_token': str(uuid.uuid4())})
+
+    def get_charge_policy(self):
+        return charge_policy(load_config(self.config_path).get('battery_management', {}))
+
+    def set_charge_policy(self, policy):
+        return self.save_section('battery_management', charge_policy(policy))
 
     def get_battery_profiles(self):
         """Predefined profile names for the connected firmware (no I2C)."""

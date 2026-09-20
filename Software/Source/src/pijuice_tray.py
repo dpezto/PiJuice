@@ -54,8 +54,9 @@ def _find_settings_app():
 
 class PiJuiceTray(object):
     def __init__(self):
-        self.service = PiJuiceService()
+        self.service = PiJuiceService(connect=False)
         self.refresh_err = 0
+        self._pending = False
 
         self.indicator = AppIndicator.Indicator.new(
             APP_ID, "pijuice", AppIndicator.IndicatorCategory.HARDWARE
@@ -112,20 +113,36 @@ class PiJuiceTray(object):
         return "bat-%d" % step
 
     def refresh(self):
-        try:
-            level = self.service.get_charge_level()
-            status = self.service.get_status()
-            self.refresh_err = 0
-        except PiJuiceError:
-            self.refresh_err += 1
-            self.indicator.set_icon_full("connection-error", "PiJuice: no connection")
-            self.level_item.set_label("No connection")
-            if self.refresh_err > 4:
-                Gtk.main_quit()
+        if self._pending:
             return True
-        self.indicator.set_icon_full(self._icon_name(level, status), "%d%%" % level)
-        self.level_item.set_label("Charge: %d%%" % level)
-        return True  # keep the timer
+        self._pending = True
+        def read():
+            if not self.service.available or self.refresh_err:
+                self.service.connect()
+            return self.service.get_charge_level(), self.service.get_status()
+        def completed(future):
+            try:
+                result = future.result()
+            except Exception:
+                GLib.idle_add(self._refreshed, None)
+            else:
+                GLib.idle_add(self._refreshed, result)
+        self.service.submit(read).add_done_callback(completed)
+        return True
+
+    def _refreshed(self, result):
+        self._pending = False
+        if result is None:
+            self.refresh_err += 1
+            self.indicator.set_icon_full("connection-error", "PiJuice: reconnecting")
+            self.level_item.set_label("Not connected — retrying…")
+        else:
+            self.refresh_err = 0
+            level, status = result
+            level = max(0, min(100, int(level)))
+            self.indicator.set_icon_full(self._icon_name(level, status), "%d%%" % level)
+            self.level_item.set_label("Charge: %d%%" % level)
+        return False
 
     def _on_settings(self, _widget):
         app = _find_settings_app()
@@ -158,8 +175,11 @@ def main():
     except OSError:
         pass
 
-    PiJuiceTray()
-    Gtk.main()
+    tray = PiJuiceTray()
+    try:
+        Gtk.main()
+    finally:
+        tray.service.close()
 
 
 if __name__ == "__main__":

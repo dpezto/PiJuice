@@ -42,7 +42,7 @@ if int(os.environ.get('PIJUICE_BUILD_BASE', 0)) > 0:
     description = "Software package for PiJuice"
     # pijuice_service is the shared, UI-agnostic facade imported by both the CLI
     # (here) and the GTK GUI, so it ships as a py_module alongside pijuice.
-    py_modules=['pijuice', 'pijuice_service']
+    py_modules=['pijuice', 'pijuice_service', 'pijuice_battery']
 else:
     name = "pijuice-gui"
     py_modules = None

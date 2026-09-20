@@ -4,13 +4,12 @@
 
 Design:
   * libadwaita gives a HIG-consistent look and **follows the system light/dark
-    scheme automatically** — using ``Adw.Application`` is the whole of the dark
-    mode support, no custom CSS. Each tab is an ``Adw.PreferencesPage`` of
+    scheme automatically**, with a theme-name fallback for Raspberry Pi OS. Each tab is an ``Adw.PreferencesPage`` of
     ``Adw.PreferencesGroup`` rows (``ActionRow``/``ComboRow``/``EntryRow`` +
     ``Gtk.Switch``/``SpinButton`` suffixes); a ``Gtk.Stack`` + ``StackSidebar``
     switches between them.
   * All HAT access goes through :class:`pijuice_service.PiJuiceService`. No widget
-    ever touches I2C or the JSON config directly — that is the decoupling. Reads
+    ever touches I2C or the config file directly — that is the decoupling. Reads
     run on the service's worker thread and results are marshalled back to the GTK
     main loop with ``GLib.idle_add`` (see :meth:`_View.run_async`).
 
@@ -20,19 +19,20 @@ Bookworm ships 1.2, so we use ``Adw.ActionRow`` + a suffix widget instead.
 Run on the device:  python3 pijuice_gtk.py   (--selftest builds the window and exits)
 """
 
+import copy
 import datetime
 import os
 import re
 import sys
 
-# The Pi has no a11y D-Bus; skip it to avoid a noisy startup warning.
-os.environ.setdefault("GTK_A11Y", "none")
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+from pijuice_battery import profile_label
 
 from pijuice_service import (  # noqa: E402
     LED_USER_SELECTABLE,
@@ -67,7 +67,7 @@ def _portal_color_scheme():
             "Read",
             GLib.Variant("(ss)", ("org.freedesktop.appearance", "color-scheme")),
             Gio.DBusCallFlags.NONE,
-            -1,
+            1500,
             None,
         )
         # Read returns (v); the value is often doubly variant-wrapped (v of v).
@@ -134,28 +134,190 @@ class _View(Adw.PreferencesPage):
         self.service = service
         self._status = Gtk.Label(xalign=0, wrap=True)
         self._status.add_css_class("dim-label")
+        self._pending = 0
+        self._writing = False
+        self._applying = False
+        self._loading = False
+        self._disposed = False
+        self._timers = []
+        self._baseline = {}
+        self._tracked = set()
+        self._actions = None
+        self._status_added = False
+        self._built_available = service.available
+        GLib.idle_add(self._capture)
 
-    # --- threading -----------------------------------------------------------
-    def run_async(self, fn, on_done=None, on_error=None):
-        """Run ``fn`` on the I2C worker; deliver result/error on the GTK loop."""
-        future = self.service.submit(fn)
 
-        def _settle(fut):
+    @staticmethod
+    def _controls(widget):
+        # Stop at composite controls: their internal entries are implementation details.
+        for typ, prop in ((Adw.ComboRow, "selected"), (Gtk.SpinButton, "value"),
+                          (Adw.EntryRow, "text"), (Gtk.Entry, "text"),
+                          (Gtk.Switch, "active")):
+            if isinstance(widget, typ):
+                if not getattr(widget, "_immediate", False):
+                    yield widget, prop
+                if not isinstance(widget, Adw.ComboRow):
+                    return
+                break
+        if isinstance(widget, Gtk.Popover):
+            return
+        child = widget.get_first_child()
+        while child:
+            yield from _View._controls(child)
+            child = child.get_next_sibling()
+
+    @property
+    def dirty(self):
+        return any(w.get_property(prop) != value
+                   for (w, prop), value in self._baseline.items()
+                   if w.get_root() == self.get_root())
+
+    def _capture(self):
+        if self._disposed:
+            return False
+        self._baseline = {(w, prop): w.get_property(prop)
+                          for w, prop in self._controls(self)}
+        for w, prop in self._baseline:
+            if w not in self._tracked:
+                w.connect("notify::" + prop, self._changed)
+                self._tracked.add(w)
+        self._changed()
+        return False
+
+    def _changed(self, *_args):
+        if self._loading:
+            return
+        if self._actions:
+            self._actions.set_visible(self.dirty)
+        if self.dirty:
+            self.flash("Unsaved changes")
+
+    def _discard(self, *_args):
+        self._loading = True
+        # Restoring a mode can rebuild dependent controls; refresh those from device.
+        for (w, prop), value in list(self._baseline.items()):
+            w.set_property(prop, value)
+            w.remove_css_class("error")
+        self._loading = False
+        self._capture()
+        if hasattr(self, "refresh"):
+            self.refresh()
+        self.flash("Changes discarded.")
+
+    def poll(self, seconds, callback):
+        def tick():
+            if self._disposed:
+                return False
+            if not self._pending and not self._writing and self.get_mapped():
+                callback()
+            return True
+        self._timers.append(GLib.timeout_add_seconds(seconds, tick))
+
+    def dispose_view(self):
+        self._disposed = True
+        for timer in self._timers:
+            GLib.source_remove(timer)
+        self._timers.clear()
+
+    def run_async(self, fn, on_done=None, on_error=None, write=False, preserve=False, live=False):
+        """Serialize device operations and settle every outcome on the GTK loop."""
+        write = write or self._applying
+        baseline = self._baseline.copy()
+        if self._disposed or (write and self._writing):
+            return
+        if write:
+            self._writing = True
+            self.set_sensitive(False)
+            self.flash("Applying…")
+        self._pending += 1
+        def settle(result=None, error=None):
+            self._pending -= 1
+            if self._disposed:
+                return False
+            if write:
+                self._writing = False
+                self.set_sensitive(True)
+            if error is not None:
+                if on_error:
+                    on_error(error)
+                else:
+                    self.flash("Could not complete the operation: %s. Your edits are kept; retry when ready. Earlier steps may already have applied." % error)
+            elif on_done:
+                # Background reads must never replace a draft.
+                if write or live or (not self.dirty and not self._writing):
+                    self._loading = True
+                    try:
+                        on_done(result)
+                    finally:
+                        self._loading = False
+                    if preserve:
+                        self._baseline = baseline
+                        self._changed()
+                    elif not live:
+                        self._capture()
+            return False
+        def completed(fut):
             try:
                 result = fut.result()
-            except PiJuiceError as exc:
-                if on_error is not None:
-                    GLib.idle_add(on_error, exc)
-                else:
-                    GLib.idle_add(self._status.set_text, str(exc))
-                return
-            if on_done is not None:
-                GLib.idle_add(on_done, result)
-
-        future.add_done_callback(_settle)
+            except Exception as exc:
+                GLib.idle_add(settle, None, exc)
+            else:
+                GLib.idle_add(settle, result)
+        try:
+            self.service.submit(fn).add_done_callback(completed)
+        except Exception as exc:
+            settle(error=exc)
 
     def flash(self, text):
         self._status.set_text(text)
+        root = self.get_root()
+        if root is not None and hasattr(root, "_toasts") and self.get_mapped() and text != "Unsaved changes":
+            root._toasts.add_toast(Adw.Toast(title=text, timeout=5))
+
+    def number(self, entry, label, lo, hi, typ=int):
+        try:
+            value = typ(entry.get_text().strip())
+            if not lo <= value <= hi:
+                raise ValueError()
+        except ValueError:
+            entry.add_css_class("error")
+            entry.set_tooltip_text("%s must be between %s and %s" % (label, lo, hi))
+            entry.grab_focus()
+            raise ValueError("%s must be between %s and %s" % (label, lo, hi))
+        entry.remove_css_class("error")
+        return value
+
+    def confirm(self, heading, body, callback):
+        dialog = Adw.MessageDialog(transient_for=self.get_root(), modal=True,
+                                   heading=heading, body=body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("confirm", "Continue")
+        dialog.set_response_appearance("confirm", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_close_response("cancel")
+        dialog.set_default_response("cancel")
+        dialog.connect("response", lambda d, r: callback() if r == "confirm" else None)
+        dialog.present()
+
+    def immediate(self, switch, setter, message):
+        switch._immediate = True
+        def changed(_switch, state):
+            if self._loading:
+                return False
+            old = switch.get_state()
+            def done(_result):
+                switch.set_active(state)
+                switch.set_state(state)
+                self.flash(message)
+            def failed(exc):
+                self._loading = True
+                switch.set_active(old)
+                switch.set_state(old)
+                self._loading = False
+                self.flash("Change failed: %s. Try again." % exc)
+            self.run_async(lambda: setter(state), done, failed, write=True, preserve=True)
+            return True
+        switch.connect("state-set", changed)
 
     def require_device(self):
         """Bail out with a message when no HAT is present. Returns availability."""
@@ -166,9 +328,9 @@ class _View(Adw.PreferencesPage):
         return False
 
     def _saved(self, rc):
-        self.flash(
-            "Saved." if rc == 0 else "Saved; service notify failed (rc=%s)." % rc
-        )
+        self.flash("Saved." if rc == 0 else
+                   "Saved, but the background service did not reload. Use Retry service reload.")
+        self._retry_notify.set_visible(rc != 0)
 
     @staticmethod
     def _int(entry, default):
@@ -188,8 +350,15 @@ class _View(Adw.PreferencesPage):
         return group
 
     def add_status(self):
+        if self._status_added:
+            return
+        self._status_added = True
         group = Adw.PreferencesGroup()
         group.add(self._status)
+        self._retry_notify = Gtk.Button(label="Retry service reload", visible=False)
+        self._retry_notify.connect("clicked", lambda _b: self.run_async(
+            self.service.retry_notify, self._saved, write=True))
+        group.add(self._retry_notify)
         self.add(group)
 
     def set_actions(self, group, apply_cb=None, refresh_cb=None, apply_label="Apply"):
@@ -197,17 +366,42 @@ class _View(Adw.PreferencesPage):
         if refresh_cb is not None:
             btn = Gtk.Button(label="Refresh")
             btn.add_css_class("flat")
-            btn.connect("clicked", lambda _b: refresh_cb())
+            btn.connect("clicked", lambda _b: refresh_cb() if not self.dirty else
+                        self.flash("Apply or discard your changes before refreshing."))
             box.append(btn)
         if apply_cb is not None:
+            actions = Gtk.Box(orientation=_H, spacing=6, visible=False)
+            discard = Gtk.Button(label="Discard")
+            discard.connect("clicked", self._discard)
+            actions.append(discard)
             btn = Gtk.Button(label=apply_label)
             btn.add_css_class("suggested-action")
-            btn.connect("clicked", apply_cb)
-            box.append(btn)
+            def apply(_btn):
+                if self._pending or self._writing:
+                    return
+                self._applying = True
+                try:
+                    apply_cb(_btn)
+                except (ValueError, PiJuiceError, OSError) as exc:
+                    self.flash(str(exc))
+                finally:
+                    self._applying = False
+            btn.connect("clicked", apply)
+            actions.append(btn)
+            self._actions = actions
+            box.append(actions)
         group.set_header_suffix(box)
 
+    @staticmethod
+    def readable(value):
+        aliases = {"NO_FUNC": "No action", "NOT_USED": "Not used", "USER_LED": "Custom colour",
+                   "CHARGE_STATUS": "Charge status", "ON_OFF_STATUS": "Power status",
+                   "NOT_PRESENT": "Not connected", "PRESENT": "Connected",
+                   "CHARGING_FROM_IN": "Charging via USB", "CHARGING_FROM_5V_IO": "Charging via GPIO"}
+        return aliases.get(value, value.replace("_", " ").capitalize() if "_" in value else value)
+
     def combo_row(self, group, title, strings, subtitle=None):
-        row = Adw.ComboRow(title=title, model=Gtk.StringList.new(list(strings)))
+        row = Adw.ComboRow(title=title, model=Gtk.StringList.new([self.readable(x) for x in strings]))
         if subtitle:
             row.set_subtitle(subtitle)
         group.add(row)
@@ -218,6 +412,7 @@ class _View(Adw.PreferencesPage):
         if subtitle:
             row.set_subtitle(subtitle)
         switch = Gtk.Switch(active=active, valign=_CENTER)
+        switch.update_property([Gtk.AccessibleProperty.LABEL], [title])
         row.add_suffix(switch)
         row.set_activatable_widget(switch)
         group.add(row)
@@ -229,6 +424,7 @@ class _View(Adw.PreferencesPage):
         )
         spin = Gtk.SpinButton(adjustment=adj, numeric=True, valign=_CENTER)
         spin.set_value(value)
+        spin.update_property([Gtk.AccessibleProperty.LABEL], [title])
         row = Adw.ActionRow(title=title)
         row.add_suffix(spin)
         row.set_activatable_widget(spin)
@@ -238,7 +434,8 @@ class _View(Adw.PreferencesPage):
     def value_row(self, group, title):
         """Read-only ActionRow whose suffix Label is returned for live updates."""
         row = Adw.ActionRow(title=title)
-        label = Gtk.Label(label="…", xalign=1, selectable=True, wrap=True)
+        label = Gtk.Label(label="…", xalign=1, selectable=True, wrap=True,
+                          width_chars=20, max_width_chars=32, hexpand=True)
         label.add_css_class("dim-label")
         row.add_suffix(label)
         group.add(row)
@@ -263,7 +460,15 @@ class StatusView(_View):
     def __init__(self, service):
         super().__init__(service)
         self._labels = {}
-        group = self.add_group("Status")
+        summary = self.add_group("Battery")
+        self._charge = Gtk.Label(label="Connecting…", xalign=0)
+        self._charge.add_css_class("title-1")
+        summary.add(self._charge)
+        self._level = Gtk.LevelBar(min_value=0, max_value=100)
+        self._level.update_property([Gtk.AccessibleProperty.LABEL], ["Battery charge"])
+        summary.add(self._level)
+        group = self.add_group("Power and health")
+        self._switch_initialized = False
         fields = [
             ("battery", "Battery"),
             ("gpio", "GPIO power input"),
@@ -289,14 +494,15 @@ class StatusView(_View):
             self.flash("No PiJuice detected.")
         else:
             self.refresh()
-            GLib.timeout_add_seconds(2, self._tick)
+            self.poll(2, self._tick)
 
     def _tick(self):
         self.refresh()
         return True  # keep the timer running
 
     def refresh(self):
-        self.run_async(self._read, self._apply)
+        if not self._pending:
+            self.run_async(self._read, self._apply, live=True)
 
     def _read(self):
         """Best-effort read of all status fields (runs on the worker)."""
@@ -307,7 +513,8 @@ class StatusView(_View):
             status = {}
 
         try:
-            batt = "%i%%" % self.service.get_charge_level()
+            out["level"] = self.service.get_charge_level()
+            batt = "%i%%" % out["level"]
             try:
                 mv = float(self.service.get_battery_voltage())
                 batt += ", %.3fV" % (mv / 1000)
@@ -317,12 +524,12 @@ class StatusView(_View):
             except PiJuiceError:
                 pass
             if status.get("battery"):
-                batt += ", %s" % status["battery"]
+                batt += ", %s" % self.readable(status["battery"])
             out["battery"] = batt
         except PiJuiceError as exc:
             out["battery"] = str(exc)
 
-        out["usb"] = str(status.get("powerInput", "N/A"))
+        out["usb"] = self.readable(str(status.get("powerInput", "Unavailable")))
 
         try:
             iov = float(self.service.get_io_voltage()) / 1000
@@ -330,7 +537,7 @@ class StatusView(_View):
             out["gpio"] = "%.3fV, %.3fA, %s" % (
                 iov,
                 ioc,
-                status.get("powerInput5vIo", "N/A"),
+                self.readable(status.get("powerInput5vIo", "Unavailable")),
             )
         except PiJuiceError:
             out["gpio"] = "N/A"
@@ -349,6 +556,7 @@ class StatusView(_View):
 
         try:
             sw = self.service.get_system_power_switch()
+            out["switch_value"] = sw
             out["sys_sw"] = ("%dmA" % sw) if sw else "Off"
         except PiJuiceError:
             out["sys_sw"] = "N/A"
@@ -356,19 +564,34 @@ class StatusView(_View):
         return out
 
     def _apply(self, data):
+        level = data.get("level")
+        self._charge.set_text("%s%% charged" % level if level is not None else "Battery unavailable")
+        self._level.set_visible(level is not None)
+        if level is not None:
+            self._level.set_value(max(0, min(100, level)))
         for key, value in data.items():
             if key in self._labels:
                 self._labels[key].set_text(value)
+        if not self._switch_initialized and "switch_value" in data:
+            value = data["switch_value"]
+            if value in self._switch_values:
+                self._switch.set_selected(self._switch_values.index(value))
+            self._switch_initialized = True
+            self._capture()
 
     def _on_set_switch(self, _btn):
         idx = self._switch.get_selected()
         value = self._switch_values[idx] if 0 <= idx < len(self._switch_values) else 0
-        self.run_async(
-            lambda: self.service.set_system_power_switch(value),
-            lambda _r: self.flash(
-                "System switch set to %s." % ("Off" if not value else "%dmA" % value)
-            ),
-        )
+        def apply():
+            self.run_async(
+                lambda: self.service.set_system_power_switch(value),
+                lambda _r: (self.flash("System power switch updated."), self.refresh()),
+                write=True,
+            )
+        if value == 0:
+            self.confirm("Turn off system power?", "This can immediately interrupt power to connected equipment.", apply)
+        else:
+            apply()
 
 
 # ── LED view (includes the B1a "red disables green" fix) ─────────────────────
@@ -383,10 +606,8 @@ class LedView(_View):
         head = self.add_group(
             "LEDs",
             description=(
-                "Set a LED to USER_LED to control its colour directly. In "
-                "CHARGE_STATUS the firmware drives R/G itself, which is why a "
-                "manual colour appears to “disable” a channel. “Test colour” "
-                "forces USER_LED first."
+                "Choose charge status or a custom colour. Preview temporarily displays "
+                "the colour, then restores the saved LED settings."
             ),
         )
         if not self.require_device():
@@ -404,11 +625,16 @@ class LedView(_View):
         r = self.spin_row(group, "Red", 0, 255)[1]
         g = self.spin_row(group, "Green", 0, 255)[1]
         b = self.spin_row(group, "Blue", 0, 255)[1]
-        test = Gtk.Button(label="Test colour")
+        test = Gtk.Button(label="Preview colour")
         test.add_css_class("flat")
         test.connect("clicked", self._on_test, led)
         group.set_header_suffix(test)
         self._rows[led] = {"function": func, "r": r, "g": g, "b": b}
+        def custom_colour(_spin):
+            if not self._loading:
+                self.combo_set(func, "USER_LED", LED_USER_SELECTABLE)
+        for spin in (r, g, b):
+            spin.connect("value-changed", custom_colour)
 
     def refresh(self):
         for led in self._rows:
@@ -438,21 +664,28 @@ class LedView(_View):
         }
 
     def _on_apply(self, _btn):
-        for led in self._rows:
-            cfg = self._row_config(led)
-            self.run_async(
-                lambda led=led, cfg=cfg: self.service.set_led_config(led, cfg),
-                lambda _r: self.flash("LED settings applied."),
-            )
+        configs = [(led, self._row_config(led)) for led in self._rows]
+        def work():
+            for led, cfg in configs:
+                self.service.set_led_config(led, cfg)
+        self.run_async(work, lambda _r: self.flash("LED settings applied."), write=True)
 
     def _on_test(self, _btn, led):
         row = self._rows[led]
         rgb = [row[ch].get_value_as_int() for ch in ("r", "g", "b")]
-        # set_led_color enforces USER_LED first — the actual bug fix.
-        self.run_async(
-            lambda: self.service.set_led_color(led, rgb),
-            lambda _r: self.flash("%s -> rgb%s (USER_LED)." % (led, tuple(rgb))),
-        )
+        # Preview is transient and restores the actual saved configuration.
+        def work():
+            import time
+            saved = self.service.get_led_config(led)
+            try:
+                self.service.set_led_config(led, {
+                    "function": "USER_LED", "parameter": dict(zip(("r", "g", "b"), rgb))
+                })
+                time.sleep(1)
+            finally:
+                self.service.set_led_config(led, saved)
+        self.run_async(work, lambda _r: self.flash("Preview finished. Saved LED settings restored."),
+                       write=True, preserve=True)
 
 
 # ── buttons view ─────────────────────────────────────────────────────────────
@@ -486,7 +719,9 @@ class ButtonsView(_View):
             group = self.add_group(button)
             for event in self.service.button_events:
                 row = self.combo_row(group, event, self._functions)
-                param = Gtk.Entry(text="0", width_chars=4, valign=_CENTER)
+                param = Gtk.Entry(text="0", width_chars=6, valign=_CENTER)
+                param.set_tooltip_text("Delay in milliseconds, in steps of 100 (0–25500)")
+                param.update_property([Gtk.AccessibleProperty.LABEL], [event + " delay in milliseconds"])
                 row.add_suffix(param)
                 self._cells[(button, event)] = (row, param)
         self.add_status()
@@ -512,20 +747,20 @@ class ButtonsView(_View):
             param.set_text(str(conf.get("parameter", 0)))
 
     def _on_apply(self, _btn):
+        configs = []
         for button in self.service.buttons:
             config = {}
             for event in self.service.button_events:
                 func, param = self._cells[(button, event)]
-                fn = self.combo_get(func, self._functions, "NO_FUNC")
-                try:
-                    pval = int(param.get_text())
-                except ValueError:
-                    pval = 0
-                config[event] = {"function": fn, "parameter": pval}
-            self.run_async(
-                lambda b=button, c=config: self.service.set_button_config(b, c),
-                lambda _r: self.flash("Button settings applied."),
-            )
+                pval = self.number(param, "%s %s delay (ms)" % (button, event), 0, 25500)
+                if pval % 100:
+                    raise ValueError("Button delays must use steps of 100 ms.")
+                config[event] = {"function": self.combo_get(func, self._functions, "NO_FUNC"), "parameter": pval}
+            configs.append((button, config))
+        def work():
+            for button, config in configs:
+                self.service.set_button_config(button, config)
+        self.run_async(work, lambda _r: self.flash("Button settings applied."), write=True)
 
 
 # ── user scripts view (config JSON) ──────────────────────────────────────────
@@ -594,10 +829,16 @@ class UserScriptsView(_View):
         self._chooser = None
 
     def _on_apply(self, _btn):
-        cfg = self.service.config.setdefault("user_functions", {})
+        cfg = copy.deepcopy(self.service.config.get("user_functions", {}))
         for key, entry in self._entries.items():
-            cfg[key] = entry.get_text().strip()
-        self.run_async(self.service.save_and_notify, self._saved)
+            value = entry.get_text().strip()
+            if value and (not os.path.isabs(value) or not os.path.isfile(value)):
+                entry.add_css_class("error")
+                entry.grab_focus()
+                raise ValueError("Choose an existing script using its full path.")
+            entry.remove_css_class("error")
+            cfg[key] = value
+        self.run_async(lambda: self.service.save_section("user_functions", cfg), self._saved)
 
 
 # ── system events view (config JSON) ─────────────────────────────────────────
@@ -638,16 +879,17 @@ class SystemEventsView(_View):
             row = self.combo_row(group, text, self._functions)
             self.combo_set(row, ev["function"], self._functions)
             switch = Gtk.Switch(active=bool(ev["enabled"]), valign=_CENTER)
+            switch.update_property([Gtk.AccessibleProperty.LABEL], [text + " enabled"])
             row.add_prefix(switch)
             self._rows[key] = (switch, row)
         self.add_status()
 
     def _on_apply(self, _btn):
-        cfg = self.service.config.setdefault("system_events", {})
+        cfg = copy.deepcopy(self.service.config.get("system_events", {}))
         for key, (switch, row) in self._rows.items():
             fn = self.combo_get(row, self._functions, "NO_FUNC")
             cfg[key] = {"enabled": switch.get_active(), "function": fn}
-        self.run_async(self.service.save_and_notify, self._saved)
+        self.run_async(lambda: self.service.save_section("system_events", cfg), self._saved)
 
 
 # ── system task view (config JSON) ───────────────────────────────────────────
@@ -707,6 +949,7 @@ class SystemTaskView(_View):
             secd = st.setdefault(sec, {})
             row = Adw.ActionRow(title=label, subtitle=vlabel)
             switch = Gtk.Switch(active=bool(secd.get("enabled", False)), valign=_CENTER)
+            switch.update_property([Gtk.AccessibleProperty.LABEL], [label + " enabled"])
             row.add_prefix(switch)
             entry = Gtk.Entry(
                 text=str(secd.get(field, "")), width_chars=8, valign=_CENTER
@@ -714,42 +957,27 @@ class SystemTaskView(_View):
             row.add_suffix(entry)
             group.add(row)
             self._rows[sec] = (switch, entry, field, typ, lo, hi)
+            switch.bind_property("active", entry, "sensitive", 2)
+            entry.update_property([Gtk.AccessibleProperty.LABEL], [label + ": " + vlabel])
         self.add_status()
 
     def _on_apply(self, _btn):
-        st = self.service.config.setdefault("system_task", {})
+        st = copy.deepcopy(self.service.config.get("system_task", {}))
         st["enabled"] = self._enabled.get_active()
-        bad = []
         for sec, (switch, entry, field, typ, lo, hi) in self._rows.items():
             secd = st.setdefault(sec, {})
             secd["enabled"] = switch.get_active()
-            text = entry.get_text().strip()
-            if text == "":
-                secd.pop(field, None)  # value unset
+            if not entry.get_text().strip() and not switch.get_active():
+                secd.pop(field, None)
                 continue
-            try:
-                val = typ(text)
-            except ValueError:
-                bad.append(sec)
-                continue
-            if not (lo <= val <= hi):
-                bad.append("%s (%s..%s)" % (sec, lo, hi))
-                continue
-            secd[field] = val
-        if bad:
-            self.flash("Invalid: " + ", ".join(bad))
-            return
-        self.run_async(self.service.save_and_notify, self._saved)
+            secd[field] = self.number(entry, sec.replace("_", " "), lo, hi, typ)
+        self.run_async(lambda: self.service.save_section("system_task", st), self._saved)
 
 
 # ── battery view ─────────────────────────────────────────────────────────────
 class BatteryView(_View):
     title = "Battery"
     slug = "battery"
-    # ponytail: predefined profiles + temp-sense + RSOC + charging only. The
-    # full custom-profile editor (~20 fields) is the rare advanced path; add it
-    # with a "Custom" toggle + the GetBatteryProfile/SetCustomBatteryProfile pair
-    # when someone actually needs to hand-tune a cell.
 
     def __init__(self, service):
         super().__init__(service)
@@ -759,10 +987,31 @@ class BatteryView(_View):
             self.add_status()
             return
 
-        self._profiles = service.get_battery_profiles()
+        self._policy = service.get_charge_policy()
+        care = self.add_group("Battery care", "The charge limit runs while the Pi and PiJuice service are running. It pauses at 80% and resumes at 75%; it does not discharge the battery to 80%.")
+        _, self._limit = self.switch_row(care, "80% charge limit", "Changes immediately; leave off for maximum backup runtime")
+        self._limit._immediate = True
+        self._limit.set_active(self._policy["enabled"])
+        self._limit.connect("state-set", self._set_limit)
+        health = self.add_group("Battery condition", "Configured capacity describes the selected profile, not measured remaining capacity.")
+        self._condition = self.value_row(health, "Condition")
+        self._temperature = self.value_row(health, "Temperature")
+        self._capacity = self.value_row(health, "Configured capacity")
+        self._charge_specs = self.value_row(health, "Profile charging limits")
+        self._health_note = Gtk.Label(label="Battery history: loading…", xalign=0, wrap=True)
+        health.add(self._health_note)
+        reset = Gtk.Button(label="New battery / reset tracking…")
+        reset.connect("clicked", lambda _b: self.confirm("Start new battery history?",
+            "Cycle tracking restarts at zero and capacity health starts learning again. Use this after replacing the battery. Previous summaries are archived.",
+            lambda: self.run_async(self.service.reset_battery_history,
+                lambda rc: self.flash("Tracking reset requested." if rc == 0 else "Saved; reload the background service to start new history."), write=True)))
+        health.add(reset)
+        self._profiles = service.get_battery_profiles() + ["DEFAULT", "CUSTOM"]
         head = self.add_group()
         self.set_actions(head, self._on_apply, self.refresh)
-        self._profile = self.combo_row(head, "Profile", self._profiles)
+        self._profile = self.combo_row(head, "Profile", self._profiles,
+            "Match the exact battery model. Existing custom profiles can be edited in the CLI.")
+        self._profile.set_model(Gtk.StringList.new([profile_label(p) for p in self._profiles]))
         self._pstatus = self.value_row(head, "Status")
         self._temp = self.combo_row(
             head, "Temperature sense", service.battery_temp_sense_options
@@ -772,9 +1021,55 @@ class BatteryView(_View):
             self._rsoc = self.combo_row(
                 head, "RSoC estimation", service.rsoc_estimation_options
             )
-        _, self._charging = self.switch_row(head, "Charging enabled")
+        _, self._charging = self.switch_row(head, "Charging enabled", subtitle="Changes immediately")
+        self.immediate(self._charging, service.set_charging_config, "Charging setting updated.")
+        self._charging.set_sensitive(not self._policy["enabled"])
+        self._charging.set_tooltip_text("Managed automatically while the charge limit is enabled")
         self.add_status()
         self.refresh()
+        self.poll(5, self._refresh_health)
+
+    def _set_limit(self, switch, state):
+        if self._loading:
+            return False
+        previous = switch.get_state()
+        policy = {"enabled": state, "limit": 80, "resume": 75}
+        def done(rc):
+            self._policy = policy
+            switch.set_active(state)
+            switch.set_state(state)
+            self._charging.set_sensitive(not state)
+            self._saved(rc)
+            if rc == 0:
+                self.flash("80% charge limit " + ("enabled. The service checks every 5 seconds." if state else "disabled."))
+        def failed(exc):
+            self._loading = True
+            switch.set_active(previous)
+            switch.set_state(previous)
+            self._loading = False
+            self.flash("Could not save charge limit: %s" % exc)
+        self.run_async(lambda: self.service.set_charge_policy(policy), done, failed, write=True, preserve=True)
+        return True
+
+    def _refresh_health(self):
+        self.run_async(self.service.get_battery_report, self._show_health, live=True)
+
+    def _show_health(self, report):
+        if isinstance(report.get("policy"), dict):
+            self._policy = report["policy"]
+            self._limit.set_active(self._policy["enabled"])
+            self._charging.set_sensitive(not self._policy["enabled"])
+        if isinstance(report.get("charging"), dict):
+            self._charging.set_active(report["charging"].get("charging_enabled", False))
+        self._health_note.set_text(report.get("health", "Battery history: waiting for readings."))
+        self._condition.set_text(report["condition"])
+        temperature = report.get("temperature")
+        self._temperature.set_text("Unavailable" if temperature is None else "%s °C" % temperature)
+        capacity = report.get("design_capacity")
+        self._capacity.set_text("Unknown" if capacity is None else "%s mAh" % capacity)
+        profile = report.get("profile")
+        if isinstance(profile, dict):
+            self._charge_specs.set_text("%s mA · %s mV" % (profile.get("chargeCurrent", "?"), profile.get("regulationVoltage", "?")))
 
     def refresh(self):
         self.run_async(self._read, self._apply)
@@ -785,6 +1080,7 @@ class BatteryView(_View):
             ("status", self.service.get_battery_profile_status),
             ("temp", self.service.get_battery_temp_sense),
             ("charging", self.service.get_charging_config),
+            ("report", self.service.get_battery_report),
         ):
             try:
                 out[key] = fn()
@@ -798,6 +1094,8 @@ class BatteryView(_View):
         return out
 
     def _apply(self, data):
+        if isinstance(data.get("report"), dict):
+            self._show_health(data["report"])
         st = data.get("status")
         if isinstance(st, dict):
             self._pstatus.set_text(
@@ -808,7 +1106,8 @@ class BatteryView(_View):
                     st.get("source", "?"),
                 )
             )
-            self.combo_set(self._profile, st.get("profile"), self._profiles)
+            selected = "CUSTOM" if st.get("origin") == "CUSTOM" else "DEFAULT" if st.get("source") in ("DIP_SWITCH", "RESISTOR") else st.get("profile")
+            self.combo_set(self._profile, selected, self._profiles)
         opts = self.service.battery_temp_sense_options
         self.combo_set(self._temp, data.get("temp"), opts)
         if self._rsoc is not None:
@@ -827,7 +1126,6 @@ class BatteryView(_View):
             if self._rsoc is not None
             else None
         )
-        charging = self._charging.get_active()
 
         def work():
             if profile:
@@ -835,7 +1133,6 @@ class BatteryView(_View):
             self.service.set_battery_temp_sense(temp)
             if rsoc is not None:
                 self.service.set_rsoc_estimation(rsoc)
-            self.service.set_charging_config(charging)
             return True
 
         self.run_async(
@@ -913,6 +1210,11 @@ class IoView(_View):
                         widget.set_selected(pcfg["options"].index(val))
                 else:
                     widget.set_text(str(val))
+        for widget, prop in self._controls(group):
+            if widget not in self._tracked:
+                self._baseline[(widget, prop)] = widget.get_property(prop)
+                widget.connect("notify::" + prop, self._changed)
+                self._tracked.add(widget)
 
     def refresh(self):
         for pin in (1, 2):
@@ -932,6 +1234,7 @@ class IoView(_View):
 
     def _on_apply(self, _btn):
         pulls = self.service.io_pull_options
+        configs = []
         for pin in (1, 2):
             p = self._pins[pin]
             mode = p["modes"][p["mode"].get_selected()]
@@ -940,17 +1243,13 @@ class IoView(_View):
                 if pcfg["type"] == "enum":
                     cfg[pcfg["name"]] = pcfg["options"][widget.get_selected()]
                 else:
-                    text = widget.get_text().strip()
-                    try:
-                        cfg[pcfg["name"]] = (
-                            float(text) if pcfg["type"] == "float" else int(text)
-                        )
-                    except ValueError:
-                        cfg[pcfg["name"]] = pcfg["min"]
-            self.run_async(
-                lambda pin=pin, cfg=cfg: self.service.set_io_config(pin, cfg),
-                lambda _r: self.flash("IO settings applied."),
-            )
+                    cfg[pcfg["name"]] = self.number(widget, pcfg["name"], pcfg["min"], pcfg["max"],
+                                                   float if pcfg["type"] == "float" else int)
+            configs.append((pin, cfg))
+        def work():
+            for pin, cfg in configs:
+                self.service.set_io_config(pin, cfg)
+        self.run_async(work, lambda _r: self.flash("IO settings applied."), write=True)
 
 
 # ── wakeup alarm view ────────────────────────────────────────────────────────
@@ -962,14 +1261,16 @@ class WakeupView(_View):
 
     def __init__(self, service):
         super().__init__(service)
-        self.add_group("Wakeup Alarm")  # header (+ no-device message)
+        head = self.add_group("Wakeup Alarm", "Schedules use UTC and do not shift with daylight saving time.")
         if not service.available:
             self.flash("No PiJuice detected.")
             self.add_status()
             return
 
+        self.set_actions(head, self._on_set_alarm, self.refresh, "Apply schedule")
         clock = self.add_group("RTC clock")
         self._time = self.value_row(clock, "RTC time (UTC)")
+        self._local_time = self.value_row(clock, "Local time")
         self._time.remove_css_class("dim-label")
         self._time.add_css_class("monospace")
         set_time = Gtk.Button(label="Set from Pi")
@@ -979,10 +1280,12 @@ class WakeupView(_View):
 
         alarm = self.add_group("Alarm")
         self._daytype = self.combo_row(alarm, "Day type", self._DAY_TYPES)
-        self._day = Adw.EntryRow(title="Day value (1-31 / 1-7)")
+        self._day = Adw.EntryRow(title="Day of month (1–31)")
+        self._day.set_tooltip_text("For weekdays, use 1=Sunday to 7=Saturday; several days may be separated by semicolons.")
         alarm.add(self._day)
         _, self._every_day = self.switch_row(alarm, "Every day")
-        self._hour = Adw.EntryRow(title="Hour")
+        self._hour = Adw.EntryRow(title="Hour (0–23)")
+        self._hour.set_tooltip_text("One hour or several separated by semicolons, e.g. 8;12;18. AM/PM also accepted.")
         alarm.add(self._hour)
         _, self._every_hour = self.switch_row(alarm, "Every hour")
         self._mintype = self.combo_row(alarm, "Minute type", self._MIN_TYPES)
@@ -994,19 +1297,43 @@ class WakeupView(_View):
 
         control = self.add_group("Control")
         _, self._enabled = self.switch_row(control, "Wakeup enabled")
-        self._enabled.connect("state-set", self._on_toggle_enabled)
-        set_alarm = Gtk.Button(label="Set Alarm")
-        set_alarm.add_css_class("suggested-action")
-        set_alarm.connect("clicked", self._on_set_alarm)
-        control.set_header_suffix(set_alarm)
+        self.immediate(self._enabled, service.set_wakeup_enabled, "Wakeup setting updated.")
+        self._enabled.set_tooltip_text("Changes immediately; apply schedule edits separately")
+        self._summary = Gtk.Label(xalign=0, wrap=True)
+        alarm.add(self._summary)
+        for widget, signal in ((self._daytype, "notify::selected"), (self._mintype, "notify::selected"),
+                               (self._every_day, "notify::active"), (self._every_hour, "notify::active"),
+                               (self._day, "changed"), (self._hour, "changed"),
+                               (self._minute, "changed"), (self._second, "changed")):
+            widget.connect(signal, self._update_summary)
+        self._update_summary()
         self.add_status()
 
+        self.refresh()
+        self._tick()
+        self.poll(1, self._tick)
+
+    def refresh(self):
         self.run_async(self._read_alarm, self._apply_alarm)
-        GLib.timeout_add_seconds(1, self._tick)
+
+    def _update_summary(self, *_args):
+        weekday = self._daytype.get_selected() == 1
+        period = self._mintype.get_selected() == 1
+        self._day.set_title("Weekday (1=Sunday … 7=Saturday)" if weekday else "Day of month (1–31)")
+        self._minute.set_title("Repeat interval (1–60 minutes)" if period else "Minute (0–59)")
+        self._day.set_sensitive(not self._every_day.get_active())
+        self._hour.set_sensitive(not self._every_hour.get_active())
+        day = "Every day" if self._every_day.get_active() else (
+            ("Weekday " if weekday else "Day ") + (self._day.get_text() or "…"))
+        hour = "every hour" if self._every_hour.get_active() else "hour " + (self._hour.get_text() or "…")
+        minute = ("every %s minutes" if period else "minute %s") % (self._minute.get_text() or "…")
+        self._summary.set_text("%s, %s, %s, second %s (UTC). Apply to save this schedule." %
+                               (day, hour, minute, self._second.get_text() or "…"))
 
     def _tick(self):
         self.run_async(
-            self.service.get_rtc_time, self._show_time, on_error=lambda _e: None
+            self.service.get_rtc_time, self._show_time,
+            on_error=lambda _e: (self._time.set_text("Unavailable"), self._local_time.set_text("Unavailable")), live=True
         )
         return True
 
@@ -1016,8 +1343,12 @@ class WakeupView(_View):
                 "%04d-%02d-%02d %02d:%02d:%02d"
                 % (t["year"], t["month"], t["day"], t["hour"], t["minute"], t["second"])
             )
-        except (KeyError, TypeError):
-            pass
+            utc = datetime.datetime(t["year"], t["month"], t["day"], t["hour"], t["minute"],
+                                    t["second"], tzinfo=datetime.timezone.utc)
+            self._local_time.set_text(utc.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"))
+        except (KeyError, TypeError, ValueError):
+            self._time.set_text("Unavailable")
+            self._local_time.set_text("Unavailable")
 
     def _read_alarm(self):
         return {
@@ -1029,6 +1360,9 @@ class WakeupView(_View):
         ctrl = data.get("control") or {}
         self._enabled.set_active(bool(ctrl.get("alarm_wakeup_enabled")))
         a = data.get("alarm") or {}
+        self._every_day.set_active(False)
+        self._every_hour.set_active(False)
+        self._mintype.set_selected(0)
         if "weekday" in a:
             self._daytype.set_selected(1)
             self._set_day(a["weekday"])
@@ -1055,7 +1389,7 @@ class WakeupView(_View):
             self._day.set_text(str(value))
 
     def _on_set_time(self, _btn):
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         fields = {
             "second": now.second,
             "minute": now.minute,
@@ -1068,40 +1402,44 @@ class WakeupView(_View):
         }
         self.run_async(
             lambda: self.service.set_rtc_time(fields),
-            lambda _r: self.flash("RTC time set."),
+            lambda _r: (self.flash("RTC time set."), self._tick()),
+            write=True, preserve=True,
         )
+
+    def _schedule_values(self, entry, label, lo, hi, hours=False):
+        values = []
+        try:
+            for item in entry.get_text().upper().split(";"):
+                item = item.strip()
+                if hours and (item.endswith("AM") or item.endswith("PM")):
+                    hour = int(item[:-2].strip())
+                    if not 1 <= hour <= 12:
+                        raise ValueError()
+                    value = hour % 12 + (12 if item.endswith("PM") else 0)
+                else:
+                    value = int(item)
+                if not lo <= value <= hi:
+                    raise ValueError()
+                values.append(value)
+        except ValueError:
+            entry.add_css_class("error")
+            entry.grab_focus()
+            raise ValueError("%s must be between %s and %s; separate multiple values with semicolons." % (label, lo, hi))
+        entry.remove_css_class("error")
+        return values[0] if len(values) == 1 else ";".join(str(v) for v in sorted(set(values)))
 
     def _on_set_alarm(self, _btn):
-        alarm = {}
-        try:
-            alarm["second"] = int(self._second.get_text() or 0)
-        except ValueError:
-            alarm["second"] = 0
-        if self._mintype.get_selected() == 1:
-            alarm["minute_period"] = self._int(self._minute, 1)
-        else:
-            alarm["minute"] = self._int(self._minute, 0)
-        alarm["hour"] = (
-            "EVERY_HOUR"
-            if self._every_hour.get_active()
-            else self._hour.get_text().strip()
-        )
-        key = "weekday" if self._daytype.get_selected() == 1 else "day"
-        alarm[key] = (
-            "EVERY_DAY"
-            if self._every_day.get_active()
-            else self._day.get_text().strip()
-        )
-        self.run_async(
-            lambda: self.service.set_alarm(alarm), lambda _r: self.flash("Alarm set.")
-        )
-
-    def _on_toggle_enabled(self, _switch, state):
-        self.run_async(
-            lambda: self.service.set_wakeup_enabled(state),
-            lambda _r: self.flash("Wakeup %s." % ("enabled" if state else "disabled")),
-        )
-        return False  # let the switch update its visual state
+        alarm = {"second": self.number(self._second, "Second", 0, 59)}
+        period = self._mintype.get_selected() == 1
+        alarm["minute_period" if period else "minute"] = self.number(
+            self._minute, "Minute interval" if period else "Minute", 1 if period else 0, 60 if period else 59)
+        alarm["hour"] = "EVERY_HOUR" if self._every_hour.get_active() else self._schedule_values(self._hour, "Hour", 0, 23, hours=True)
+        weekday = self._daytype.get_selected() == 1
+        alarm["weekday" if weekday else "day"] = ("EVERY_DAY" if self._every_day.get_active()
+            else self._schedule_values(self._day, "Weekday", 1, 7) if weekday
+            else self.number(self._day, "Day", 1, 31))
+        self.run_async(lambda: self.service.set_alarm(alarm),
+                       lambda _r: self.flash("Schedule saved. Wakeup enablement is unchanged."), write=True)
 
 
 # ── firmware view ────────────────────────────────────────────────────────────
@@ -1125,6 +1463,8 @@ class FirmwareView(_View):
         group.set_header_suffix(self._update_btn)
 
         status_group = self.add_group()
+        self._spinner = Gtk.Spinner(halign=Gtk.Align.START)
+        status_group.add(self._spinner)
         self._fw_status = Gtk.Label(xalign=0, wrap=True)
         status_group.add(self._fw_status)
 
@@ -1169,7 +1509,8 @@ class FirmwareView(_View):
                 best = ver
                 self._new_ver = "%d.%d" % (int(m.group(1)), int(m.group(2)))
                 self._bin_file = os.path.join(self.FW_DIR, name)
-        self._path.set_text(self._bin_file or "No firmware file found")
+        self._path.set_text(os.path.basename(self._bin_file) if self._bin_file else "No firmware file found")
+        self._path.set_tooltip_text(self._bin_file)
 
     def refresh(self):
         if not self.service.available:
@@ -1178,6 +1519,7 @@ class FirmwareView(_View):
         self.run_async(lambda: self.service.firmware_version, self._apply_ver)
 
     def _apply_ver(self, fw):
+        self._update_btn.set_sensitive(False)
         cur = (fw or {}).get("version") if isinstance(fw, dict) else None
         self._ver.set_text(cur or "unknown")
         cur_int = None
@@ -1216,29 +1558,37 @@ class FirmwareView(_View):
                 self._confirm.set_visible(True)
             else:
                 self.flash(
-                    "Charge level too low to update (connect power or charge >20%)."
+                    "Charge level too low to update (connect power or charge to at least 20%)."
                 )
 
-        self.run_async(check, done)
+        self.run_async(check, done, write=True)
 
     def _do_flash(self, _btn):
-        if not self._bin_file:
+        if not self._bin_file or self._writing:
             return
         self._confirm.set_visible(False)
         self._update_btn.set_sensitive(False)
-        self.flash("Flashing… do not remove power.")
-        self.run_async(
-            lambda: self.service.flash_firmware(self._bin_file), self._flashed
-        )
-
-    def _flashed(self, rc):
-        if rc == 0:
-            self.flash("Firmware updated. Re-reading version…")
-            self.service.connect()  # picks up the restarted firmware
-            self.refresh()
-        else:
-            self.flash("Firmware update failed (pijuiceboot rc=%s)." % rc)
+        self._spinner.start()
+        def work():
+            # Check again: power may have changed since confirmation opened.
+            status = self.service.get_status()
+            if (status.get("powerInput") != "PRESENT" and status.get("powerInput5vIo") != "PRESENT"
+                    and self.service.get_charge_level() < 20):
+                raise PiJuiceError("Connect external power or charge to at least 20%.")
+            rc = self.service.flash_firmware(self._bin_file)
+            if rc:
+                raise PiJuiceError("Firmware update failed (code %s)" % rc)
+            return self.service.connect()
+        def failed(exc):
+            self._spinner.stop()
             self._update_btn.set_sensitive(True)
+            self.flash("%s. Check power and connection, then retry." % exc)
+        def done(connected):
+            self._spinner.stop()
+            self.flash("Firmware updated." if connected else "Firmware written. Waiting for the device to reconnect…")
+            self.refresh()
+        self.run_async(work, done, failed, write=True)
+        self.flash("Updating firmware… Keep power connected until this finishes.")
 
 
 VIEW_CLASSES = [
@@ -1260,32 +1610,134 @@ class PiJuiceWindow(Adw.ApplicationWindow):
     def __init__(self, service, **kwargs):
         super().__init__(title="PiJuice Settings", **kwargs)
         self.service = service
-        self.set_default_size(640, 480)
+        self.set_default_size(820, 600)
         _install_css(self.get_display())
 
         header = Adw.HeaderBar()
+        self._connection = Gtk.Label(label="PiJuice Settings")
+        header.set_title_widget(self._connection)
+        retry = Gtk.Button(label="Retry connection")
+        retry.connect("clicked", lambda _b: self._check_connection())
+        self._retry = retry
+        header.pack_end(retry)
+        self._connection_pending = False
+        self._closed = False
+        self._online = service.available
+        self.connect("close-request", self._on_close)
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
         self.stack.set_hexpand(True)
         sidebar = Gtk.StackSidebar(stack=self.stack)
         sidebar.set_size_request(170, -1)
+        self._leaflet = Adw.Leaflet(can_navigate_back=True)
+        self._leaflet.set_hexpand(True)
+        self._leaflet.append(sidebar)
+        self._leaflet.append(self.stack)
+        self.stack.set_size_request(360, -1)
+        back = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Settings sections")
+        header.pack_start(back)
+        back.connect("clicked", lambda _b: self._leaflet.set_visible_child(sidebar))
+        self._leaflet.bind_property("folded", back, "visible", 2)
+        self.stack.connect("notify::visible-child", lambda *_a: self._leaflet.set_visible_child(self.stack))
         for view_cls in VIEW_CLASSES:
             view = view_cls(service)
             self.stack.add_titled(view, view.slug, view.title)
 
         content = Gtk.Box(orientation=_H)
         content.set_vexpand(True)
-        content.append(sidebar)
-        content.append(Gtk.Separator(orientation=_V))
-        content.append(self.stack)
+        content.append(self._leaflet)
 
         outer = Gtk.Box(orientation=_V)
         outer.append(header)
         outer.append(content)
-        self.set_content(outer)
+        self._toasts = Adw.ToastOverlay()
+        self._toasts.set_child(outer)
+        self.set_content(self._toasts)
 
-        if not service.available:
-            header.set_title_widget(Gtk.Label(label="PiJuice Settings — no device"))
+        self._show_connection(service.available)
+        self._connection_timer = GLib.timeout_add_seconds(5, self._check_connection)
+        GLib.idle_add(lambda: (self._check_connection(), False)[1])
+
+    def _views(self):
+        return [page.get_child() for page in self.stack.get_pages()]
+
+    def _show_connection(self, online):
+        self._connection.set_text("PiJuice Settings" if online else "PiJuice not connected — retrying…")
+        self._retry.set_visible(not online)
+
+    def _check_connection(self):
+        if self._closed:
+            return False
+        if self._connection_pending or any(v._pending or v._writing for v in self._views()):
+            return True
+        self._connection_pending = True
+        def check():
+            if self.service.available:
+                try:
+                    self.service.get_status()
+                    return True
+                except Exception:
+                    pass
+            return self.service.connect()
+        def completed(fut):
+            try:
+                online = fut.result()
+            except Exception:
+                online = False
+            GLib.idle_add(self._connected, online)
+        self.service.submit(check).add_done_callback(completed)
+        return True
+
+    def _connected(self, online):
+        self._connection_pending = False
+        if self._closed:
+            return False
+        self._show_connection(online)
+        selected = self.stack.get_visible_child_name()
+        views = self._views()
+        rebuild = online and any(not v._built_available and v.slug not in
+                                  ("userscripts", "sysevents", "systask") for v in views)
+        replacements = []
+        for view in views:
+            hardware = view.slug not in ("userscripts", "sysevents", "systask")
+            if online and not view._built_available and hardware:
+                view.dispose_view()
+                replacements.append(type(view)(self.service))
+            else:
+                replacements.append(view)
+                if hardware:
+                    view.set_sensitive(online)
+                if online and not self._online and not view.dirty and hasattr(view, "refresh"):
+                    view.refresh()
+        if rebuild:
+            for view in views:
+                self.stack.remove(view)
+            for view in replacements:
+                self.stack.add_titled(view, view.slug, view.title)
+        self.stack.set_visible_child_name(selected)
+        self._online = online
+        return False
+
+    def _on_close(self, *_args):
+        views = self._views()
+        if any(v._writing for v in views):
+            self._connection.set_text("Wait for the current operation to finish before closing.")
+            return True
+        if any(v.dirty for v in views):
+            views[0].confirm("Discard unsaved changes?", "Your saved settings will be kept.", self._close_now)
+            return True
+        self._cleanup()
+        return False
+
+    def _cleanup(self):
+        self._closed = True
+        GLib.source_remove(self._connection_timer)
+        for view in self._views():
+            view.dispose_view()
+
+    def _close_now(self):
+        self._cleanup()
+        self.destroy()
 
 
 class PiJuiceApplication(Adw.Application):
@@ -1311,7 +1763,7 @@ class PiJuiceApplication(Adw.Application):
 
     def do_activate(self):
         if self.service is None:
-            self.service = PiJuiceService()
+            self.service = PiJuiceService(connect=False)
         self._apply_system_theme()
         win = self.get_active_window()
         if win is None:
@@ -1334,6 +1786,8 @@ def _selftest():
         len(VIEW_CLASSES),
         n,
     )
+    win._cleanup()
+    win.destroy()
     service.close()
     print("selftest OK: %d views built" % n)
     return 0

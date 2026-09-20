@@ -71,7 +71,7 @@ B=$OUT/pijuice-base
 put $B /usr/bin 755 src/pijuice_sys.py src/pijuice_log.py
 put $B /usr/bin 644 src/pijuice_cli.py
 put $B /usr/bin 755 bin/pijuiceboot32 bin/pijuiceboot64 bin/pijuice_cli32 bin/pijuice_cli64
-put $B /usr/lib/python3/dist-packages 644 pijuice.py pijuice_service.py
+put $B /usr/lib/python3/dist-packages 644 pijuice.py pijuice_service.py pijuice_battery.py
 put $B /usr/share/pijuice/data/firmware 644 data/firmware/*
 put $B /etc/udev/rules.d 644 data/99-i2c.rules
 put $B /etc/sudoers.d 440 data/020_pijuice-nopasswd
