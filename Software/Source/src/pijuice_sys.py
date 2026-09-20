@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import grp
 import json
+import logging
 import os
 import pwd
 import signal
@@ -15,6 +16,22 @@ import re
 
 from pijuice import PiJuice
 from pijuice_battery import ChargeLimiter, BatteryHistory
+
+
+
+class _JournalFormatter(logging.Formatter):
+    """Prefix each line with the sd-daemon <priority> journald parses from stdout."""
+    PRIORITY = {logging.DEBUG: 7, logging.INFO: 6, logging.WARNING: 4, logging.ERROR: 3, logging.CRITICAL: 2}
+
+    def format(self, record):
+        return '<%d>%s' % (self.PRIORITY.get(record.levelno, 6), super().format(record))
+
+
+log = logging.getLogger('pijuice')
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_JournalFormatter('%(message)s'))
+log.addHandler(_handler)
+log.setLevel(logging.INFO)
 
 pijuice = None
 btConfig = {}
@@ -58,7 +75,7 @@ def _TrackBattery():
     except Exception as exc:
         message = str(exc)
         if message != batteryHistoryError:
-            print("Battery tracking: " + message, flush=True)
+            log.warning("Battery tracking: %s", message)
             batteryHistoryError = message
 
 
@@ -71,7 +88,7 @@ def _EvalChargeLimit(status):
     except Exception as exc:
         message = 'Charge limiter: ' + str(exc)
     if message != chargeLimitMessage:
-        print(message, flush=True)
+        (log.warning if message.startswith('Charge limiter:') else log.info)(message)
         chargeLimitMessage = message
 
 
@@ -124,21 +141,21 @@ def ExecuteFunc(func, event, param):
         owner = pwd.getpwuid(statinfo.st_uid).pw_name
         # Do not allow programs owned by root
         if owner == 'root':
-            print("root owned " + cmd + " not allowed")
+            log.warning("root owned %s not allowed", cmd)
             return
         # Check cmd has executable permission
         if statinfo.st_mode & stat.S_IXUSR == 0:
-            print(cmd + " is not executable")
+            log.warning("%s is not executable", cmd)
             return
         # Owner of cmd must belong to mygroup ('pijuice')
         if os.getegid() not in os.getgrouplist(owner, statinfo.st_gid):
-            print(cmd + " owner ('" + owner + "') does not belong to '" + grp.getgrgid(os.getegid()).gr_name + "'")
+            log.warning("%s owner ('%s') does not belong to '%s'", cmd, owner, grp.getgrgid(os.getegid()).gr_name)
             return
         # All checks passed
         try:
             subprocess.call(["sudo", "-u", owner, cmd, str(event), str(param)])
-        except:
-            print('Failed to execute user func')
+        except OSError as exc:
+            log.error('Failed to execute user func %s: %s', cmd, exc)
 
 
 def _EvalButtonEvents():
@@ -331,7 +348,7 @@ def _write_power_supply(attr, val):
     except OSError as e:
         if (attr, e.errno) not in _psWriteErrors:
             _psWriteErrors.add((attr, e.errno))
-            print('pijuice_power: cannot write %s: %s' % (attr, e), file=sys.stderr, flush=True)
+            log.error('pijuice_power: cannot write %s: %s', attr, e)
 
 
 def _UpdatePowerSupply(status):
@@ -341,12 +358,11 @@ def _UpdatePowerSupply(status):
     if not os.path.isdir(POWER_SUPPLY_DIR):
         if not _psMissingReported:
             _psMissingReported = True
-            print('pijuice_power: %s missing, is the pijuice_power module loaded?' % POWER_SUPPLY_DIR,
-                  file=sys.stderr, flush=True)
+            log.warning('pijuice_power: %s missing, is the pijuice_power module loaded?', POWER_SUPPLY_DIR)
         return
     if _psMissingReported:
         _psMissingReported = False
-        print('pijuice_power: %s present again' % POWER_SUPPLY_DIR, flush=True)
+        log.info('pijuice_power: %s present again', POWER_SUPPLY_DIR)
     if _batCapacityMah is None:
         prof = pijuice.config.GetBatteryProfile()
         if prof.get('error') == 'NO_ERROR' and isinstance(prof['data'].get('capacity'), int):
@@ -415,7 +431,7 @@ def main():
         try:
             ChargeLimiter().release(pijuice)
         except Exception as exc:
-            print('Unable to release charge limit on stop: %s' % exc, flush=True)
+            log.error('Unable to release charge limit on stop: %s', exc)
         if os.path.isdir(POWER_SUPPLY_DIR):
             _write_power_supply('present', 0)  # nobody feeds it now; don't show a stale battery
 
@@ -467,21 +483,21 @@ def main():
     if rtcModuleFound:
         # Check for /dev/rtc (means rtc is operational)
         if os.path.exists('/dev/rtc'):
-            print('RTC os-support OK', flush=True)
+            log.info('RTC os-support OK')
         else:
             # Remove and reload the rtc_ds1307 module
             ret = os.system('sudo modprobe -r rtc_ds1307')
             if ret != 0:
-                print('Remove rtc_ds1307 module failed', flush=True)
+                log.error('Remove rtc_ds1307 module failed')
             else:
                 ret = os.system('sudo modprobe rtc_ds1307')
                 if (ret != 0):
-                    print('Reload rtc_ds1307 module failed', flush=True)
+                    log.error('Reload rtc_ds1307 module failed')
                 else:
                     if os.path.exists('/dev/rtc'):
-                        print('rtc_ds1307 mdule reloaded and RTC os-support OK', flush=True)
+                        log.info('rtc_ds1307 module reloaded and RTC os-support OK')
                     else:
-                        print('RTC os-support not available', flush=True)
+                        log.warning('RTC os-support not available')
 
     if watchdogEn: _ConfigureWatchdog('ACTIVATE')
 
@@ -496,7 +512,7 @@ def main():
     while dopoll:
         ret = pijuice.status.GetStatus()
         if ret['error'] != 'NO_ERROR':
-            print(ret, flush=True)
+            log.error('Status read failed: %s', ret['error'])
             time.sleep(1)
             continue
         status = ret['data']
