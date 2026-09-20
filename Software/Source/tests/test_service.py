@@ -23,6 +23,16 @@ class ServiceTests(unittest.TestCase):
         self.service.close()
         self.tmp.cleanup()
 
+    def test_function_labels_are_readable_and_named(self):
+        from pijuice_service import function_label, function_description, readable
+        self.assertEqual(readable('HARD_FUNC_POWER_ON'), 'Power on')
+        self.assertEqual(readable('LONG_PRESS1'), 'Long press 1')
+        self.assertEqual(readable('PRESS'), 'Press')
+        self.assertEqual(function_label('USER_FUNC12'), 'User script 12')
+        self.assertEqual(function_label('USER_FUNC12', {'USER_FUNC12': 'Backup'}), 'Backup')
+        self.assertIn('60 s', function_description('SYS_FUNC_HALT_POW_OFF'))
+        self.assertIn('/x.sh', function_description('USER_FUNC2', {'user_functions': {'USER_FUNC2': '/x.sh'}}))
+
     def test_image_must_look_like_a_pijuice_firmware(self):
         check_firmware_file(str(self.image))
         with self.assertRaisesRegex(PiJuiceError, 'file name'):

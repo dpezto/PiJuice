@@ -86,6 +86,38 @@ pijuice-base; urgency=low
 * pijuice_power 1.3: `cycle_count`, `health` and `time_to_empty_now`, fed by
   the daemon from battery history and the HAT fault flags
 
+* CLI navigation and window:
+    - Menus open and close like a menu bar: Right (vim `l`) opens the focused
+      menu item, Left/Esc/Backspace/`q` (vim `h`) close it; Enter presses,
+      toggles or picks; Tab walks a row's fields before moving down; `q` at the
+      main menu and F10/`Q` quit; `?` shows a keys table. Entries that open a
+      screen are drawn `Name ›`, the header is a breadcrumb (`PiJuice HAT
+      Configuration › Buttons › Button SW1`), focus lands on the first usable
+      row of each screen and back returns to the row you left, and the focus
+      chain is read from the frame (Right/l, vim insert and q-in-a-field
+      detection did not work in the real terminal)
+    - Vim keybindings: `0`/`^`/`$` first/last field of a row, `b`/`w`/`e`
+      previous/next field, `ctrl-u`/`ctrl-d`; inside a field in NORMAL mode the
+      same keys move the cursor by word, `x` deletes, `I`/`A` enter INSERT at
+      the start/end, and no other key edits the field
+    - Footer notices clear themselves after a few seconds (errors after ten);
+      the footer shows only the notice, `? keys` and the vim mode; the "← back"
+      header button and the key hint line are gone
+    - The window is sized to its content (raspi-config style, up to 78
+      columns) instead of filling the terminal
+
+* Cosmetics, both apps:
+    - Button and event functions are shown by what they do ("Power on",
+      "Halt, then power off") with a one-line description of each; the
+      README has the reference table. Button events read "Single press",
+      "Long press 1"; the timing field says what it times
+    - User Scripts slots take an optional display name (`user_function_names`),
+      used wherever the slot is offered; unnamed slots read "User script n"
+    - CLI: styled titles on every screen, subtitles where a hint helps,
+      Buttons/events/User Scripts laid out in columns, footer fits 78 columns;
+      an unknown function name from the firmware (upstream #998) selects "No
+      action" instead of crashing
+
 * Firmware update:
     - `pijuiceboot` takes the I2C bus and bootloader address as optional
       arguments (were hardcoded to `/dev/i2c-1` and `0x41`); dead UART/readout

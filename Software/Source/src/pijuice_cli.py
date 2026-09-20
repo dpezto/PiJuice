@@ -30,10 +30,13 @@ from pijuice_service import (
     PiJuiceError,
     PiJuiceService,
     alarm_fields,
+    function_description,
+    function_label,
     load_config as _service_load_config,
     readable,
     rtc_fields_now,
     schedule_values,
+    user_function_names,
     validate_number,
     version_to_str,
 )
@@ -63,6 +66,14 @@ class ActionButton(urwid.Button):
 # Buttons render with [ label ] instead of urwid's default < label >.
 urwid.Button.button_left = urwid.Text("[")
 urwid.Button.button_right = urwid.Text("]")
+
+
+class MenuButton(ActionButton):
+    """An entry that opens another screen. Drawn as 'label  ›' so it reads as a
+    menu, not a button: Right/l opens it, Left/h closes what it opened."""
+
+    button_left = urwid.Text("")
+    button_right = urwid.Text("›")
 
 PID_FILE = PID_FILE_DEFAULT
 LOCK_FILE = "/run/pijuice/pijuice_gui.lock"  # CLI-only single-instance lock
@@ -117,7 +128,8 @@ def _validate_edit(widget, text, kind, lo, hi, key):
         _flash(_errors[key], "error")
     else:
         _errors.pop(key, None)
-        _flash("Unsaved changes", "warning")
+        if _notice[0] == "error":
+            _flash("")
     return text  # Keep incomplete input editable until Apply.
 
 
@@ -192,7 +204,7 @@ class StatusTab(object):
         except PiJuiceError:
             return [("error", "Not connected — retrying automatically\n"),
                     "Check the HAT and I2C connection. Settings remain available.\n"]
-        rows = [("title", "BATTERY & POWER\n\n")]
+        rows = [("title", "Battery & power\n\n")]
         if charge is None:
             rows.append(("warning", "Charge unavailable\n"))
         else:
@@ -238,7 +250,7 @@ class StatusTab(object):
 
     def main(self, *args):
         text = urwid.Text(self.get_status())
-        rows = [text, urwid.Divider(), attrmap(ActionButton("Change power switch", on_press=self.change_power_switch)),
+        rows = [text, urwid.Divider(), attrmap(MenuButton("Change power switch", on_press=self.change_power_switch)),
                 attrmap(ActionButton("Back", on_press=self._goto_main_menu))]
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(rows))
         self._widget = main.original_widget
@@ -246,7 +258,7 @@ class StatusTab(object):
 
     def change_power_switch(self, *args):
         loop.remove_alarm(self.alarm_handle)
-        elements = [urwid.Text("Choose value for System Power switch"), urwid.Divider()]
+        elements = [urwid.Text(("title", "Choose value for System Power switch")), urwid.Divider()]
         values = [0, 500, 2100]
         for value in values:
             text = str(value) + " mA" if value else "Off"
@@ -391,7 +403,7 @@ class FirmwareTab(object):
         firmware_path_txt = urwid.Text("Path: " + str(firmware_path))
         status_txt = urwid.Text("Status: " + firmware_status)
         elements = [
-            urwid.Text("Firmware"),
+            urwid.Text(("title", "Firmware")),
             urwid.Divider(),
             current_version_txt,
             status_txt,
@@ -448,7 +460,7 @@ class GeneralTab(object):
 
     def main(self, *args):
         global pijuiceConfigData
-        elements = [urwid.Text("General settings"), urwid.Divider()]
+        elements = [urwid.Text(("title", "General settings")), urwid.Divider()]
 
         options_with_lists = [
             {"title": "Run pin", "list": self.RUN_PIN_VALUES, "key": "run_pin"},
@@ -525,7 +537,7 @@ class GeneralTab(object):
         for option in options_with_lists:
             elements.append(
                 attrmap(
-                    ActionButton(
+                    MenuButton(
                         "{title}: {value}".format(
                             title=option["title"],
                             value=option["list"][self.current_config[option["key"]]],
@@ -689,12 +701,12 @@ class LEDTab(object):
         self.main()
 
     def main(self, *args):
-        elements = [urwid.Text("LED settings"), urwid.Divider()]
+        elements = [urwid.Text(("title", "LED settings")), urwid.Divider()]
         for i in range(len(self.LED_NAMES)):
             elements.append(
                 urwid.Padding(
                     attrmap(
-                        ActionButton(
+                        MenuButton(
                             self.LED_NAMES[i], on_press=self.configure_led, user_data=i
                         )
                     ),
@@ -715,10 +727,10 @@ class LEDTab(object):
         )
 
     def configure_led(self, button, index):
-        elements = [urwid.Text("LED " + self.LED_NAMES[index]), urwid.Divider()]
+        elements = [urwid.Text(("title", "LED " + self.LED_NAMES[index])), urwid.Divider()]
         colors = ("R", "G", "B")
-        self._function_button = ActionButton(
-            "Function: {value}".format(value=self.current_config[index]["function"]),
+        self._function_button = MenuButton(
+            "Function: {value}".format(value=readable(self.current_config[index]["function"])),
             on_press=self._list_functions,
             user_data=index,
         )
@@ -778,12 +790,12 @@ class LEDTab(object):
 
     def _list_functions(self, button, led_index):
         body = [
-            urwid.Text("Choose function for " + self.LED_NAMES[led_index]),
+            urwid.Text(("title", "Choose function for " + self.LED_NAMES[led_index])),
             urwid.Divider(),
         ]
         self.bgroup = []
         for choice in self.LED_FUNCTIONS_OPTIONS:
-            button = urwid.RadioButton(self.bgroup, choice)
+            button = urwid.RadioButton(self.bgroup, readable(choice))
             body.append(attrmap(button))
         self.bgroup[
             self.LED_FUNCTIONS_OPTIONS.index(self.current_config[led_index]["function"])
@@ -818,7 +830,7 @@ class LEDTab(object):
         self.current_config[led_index]["color"][color_index] = _validate_edit(edit, text, "int", 0, 255, key)
         if self.current_config[led_index]["function"] != "USER_LED":
             self.current_config[led_index]["function"] = "USER_LED"
-            self._function_button.set_label("Function: USER_LED")
+            self._function_button.set_label("Function: " + readable("USER_LED"))
 
 
 
@@ -837,12 +849,12 @@ class ButtonsTab(object):
         self.main()
 
     def main(self, *args):
-        elements = [urwid.Text("Buttons"), urwid.Divider()]
+        elements = [urwid.Text(("title", "Buttons")), urwid.Divider()]
         for sw_id in self.BUTTONS:
             elements.append(
                 urwid.Padding(
                     attrmap(
-                        ActionButton(sw_id, on_press=self.configure_sw, user_data=sw_id)
+                        MenuButton(sw_id, on_press=self.configure_sw, user_data=sw_id)
                     ),
                     width=7,
                 )
@@ -871,17 +883,18 @@ class ButtonsTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def configure_sw(self, button, sw_id):
-        elements = [urwid.Text("Settings for " + sw_id), urwid.Divider()]
+        elements = [urwid.Text(("title", "Button " + sw_id)),
+                    urwid.Text(("muted", "Timings are in ms; press and release have none.")), urwid.Divider()]
         config = self.current_config[sw_id]
+        names = user_function_names(loadPiJuiceConfig())
         for action, parameters in config.items():
+            label = "%-13s %s" % (readable(action), function_label(parameters["function"], names))
+            if action not in ("PRESS", "RELEASE"):
+                label += " · %s ms" % parameters["parameter"]
             elements.append(
                 attrmap(
-                    ActionButton(
-                        "{action}: {function}, {parameter}".format(
-                            action=action,
-                            function=parameters["function"],
-                            parameter=parameters["parameter"],
-                        ),
+                    MenuButton(
+                        label,
                         on_press=self.configure_action,
                         user_data={"sw_id": sw_id, "action": action},
                     )
@@ -891,22 +904,21 @@ class ButtonsTab(object):
             urwid.Divider(),
             urwid.Padding(attrmap(ActionButton("Back", on_press=self.main)), width=8),
         ]
-        main.original_widget = urwid.Padding(
-            CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=46
-        )
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def configure_action(self, button, data):
         sw_id = data["sw_id"]
         action = data["action"]
+        function = self.current_config[sw_id][action]["function"]
         functions_btn = attrmap(
-            ActionButton(
-                "Function: {}".format(self.current_config[sw_id][action]["function"]),
+            MenuButton(
+                "Function: {}".format(function_label(function, user_function_names(loadPiJuiceConfig()))),
                 on_press=self._set_function,
                 user_data={"sw_id": sw_id, "action": action},
             )
         )
         parameter_edit = urwid.Edit(
-            "Parameter: ",
+            "Timing [ms]: ",
             edit_text=str(self.current_config[sw_id][action]["parameter"]),
         )
         urwid.connect_signal(
@@ -916,9 +928,7 @@ class ButtonsTab(object):
             user_args=[{"sw_id": sw_id, "action": action}],
         )
         parameter_edit = attrmap(parameter_edit)
-        parameter_text = urwid.Text(
-            "Parameter: " + str(self.current_config[sw_id][action]["parameter"])
-        )
+        parameter_text = urwid.Text(("muted", "No timing for this event."))
         if action != "PRESS" and action != "RELEASE":
             paramline = parameter_edit
         else:
@@ -928,16 +938,15 @@ class ButtonsTab(object):
             width=8,
         )
         elements = [
-            urwid.Text("Set function for {} on {}".format(action, sw_id)),
+            urwid.Text(("title", "{} · {}".format(sw_id, readable(action)))),
             urwid.Divider(),
             functions_btn,
+            urwid.Text(("muted", function_description(function, loadPiJuiceConfig()))),
             paramline,
             urwid.Divider(),
             back_btn,
         ]
-        main.original_widget = urwid.Padding(
-            CyclingListBox(urwid.SimpleFocusListWalker(elements)), width=37
-        )
+        main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def _refresh_settings(self, *args):
         self.device_config = self._get_device_config()
@@ -950,16 +959,14 @@ class ButtonsTab(object):
         sw_id = data["sw_id"]
         action = data["action"]
         body = [
-            urwid.Text("Choose function for {} on {}".format(action, sw_id)),
+            urwid.Text(("title", "Function for {} · {}".format(sw_id, readable(action)))),
             urwid.Divider(),
         ]
         self.bgroup = []
-        for function in self.FUNCTIONS:
-            button = attrmap(urwid.RadioButton(self.bgroup, function))
-            body.append(button)
-        self.bgroup[
-            self.FUNCTIONS.index(self.current_config[sw_id][action]["function"])
-        ].toggle_state()
+        body += function_choices(self.bgroup, self.FUNCTIONS)
+        current = self.current_config[sw_id][action]["function"]
+        # An unknown name (upstream #998: the firmware reports UNKNOWN) lands on "No action".
+        self.bgroup[self.FUNCTIONS.index(current) if current in self.FUNCTIONS else 0].toggle_state()
         body.extend(
             [
                 urwid.Divider(),
@@ -1018,12 +1025,12 @@ class IOTab(object):
         self.main()
 
     def main(self, *args):
-        elements = [urwid.Text("IO settings"), urwid.Divider()]
+        elements = [urwid.Text(("title", "IO settings")), urwid.Divider()]
         for i in range(self.IO_PINS_COUNT):
             elements.append(
                 urwid.Padding(
                     attrmap(
-                        ActionButton(
+                        MenuButton(
                             "IO" + str(i + 1), on_press=self.configure_io, user_data=i
                         )
                     ),
@@ -1052,14 +1059,14 @@ class IOTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def configure_io(self, button, pin_id):
-        elements = [urwid.Text("IO{}".format(pin_id + 1)), urwid.Divider()]
+        elements = [urwid.Text(("title", "IO{}".format(pin_id + 1))), urwid.Divider()]
         pin_config = self.current_config[pin_id]
         mode = pin_config["mode"]
         pull = pin_config["pull"]
         # < Mode >
         mode_select_btn = urwid.Padding(
             attrmap(
-                ActionButton(
+                MenuButton(
                     "Mode: {}".format(mode),
                     on_press=self._select_mode,
                     user_data=pin_id,
@@ -1070,7 +1077,7 @@ class IOTab(object):
         # < Pull >
         pull_select_btn = urwid.Padding(
             attrmap(
-                ActionButton(
+                MenuButton(
                     "Pull: {}".format(pull),
                     on_press=self._select_pull,
                     user_data=pin_id,
@@ -1089,13 +1096,9 @@ class IOTab(object):
             var_min = var_config.get("min")
             var_max = var_config.get("max")
             if var_name == "wakeup" and pin_id == 1 and _fw() >= 0x13:
-                if pin_config["wakeup"] == "":
-                    pin_config["wakeup"] = self.IO_CONFIG_PARAMS["DIGITAL_IN"][0][
-                        "options"
-                    ][0]
                 wakeup_select_btn = urwid.Padding(
                     attrmap(
-                        ActionButton(
+                        MenuButton(
                             "Wakeup: {}".format(pin_config["wakeup"]),
                             on_press=self._select_wakeup,
                             user_data=pin_id,
@@ -1110,8 +1113,6 @@ class IOTab(object):
                     if var_unit
                     else "{} [{}-{}]: ".format(var_name, var_min, var_max)
                 )
-                if pin_config[var_name] == "":
-                    pin_config[var_name] = var_min
                 var_edit_1 = urwid.Edit(label, edit_text=str(pin_config[var_name]))
                 # Validate int/float
                 urwid.connect_signal(
@@ -1134,8 +1135,6 @@ class IOTab(object):
                 if var_unit
                 else "{} [{}-{}]: ".format(var_name, var_min, var_max)
             )
-            if pin_config[var_name] == "":
-                pin_config[var_name] = var_min
             var_edit_2 = urwid.Edit(label, edit_text=str(pin_config[var_name]))
             # Validate int/float
             urwid.connect_signal(
@@ -1164,7 +1163,7 @@ class IOTab(object):
         self.current_config[pin_id][var_name] = _validate_edit(widget, text, type, var_min, var_max, "IO%s %s" % (pin_id + 1, var_name))
 
     def _select_mode(self, button, pin_id):
-        elements = [urwid.Text("Mode for IO{}".format(pin_id + 1)), urwid.Divider()]
+        elements = [urwid.Text(("title", "Mode for IO{}".format(pin_id + 1))), urwid.Divider()]
         self.bgroup = []
         for choice in self.IO_SUPPORTED_MODES[pin_id + 1]:
             elements.append(
@@ -1195,18 +1194,16 @@ class IOTab(object):
     def _on_mode_selected(self, button, pin_id):
         states = [c.state for c in self.bgroup]
         mode = self.IO_SUPPORTED_MODES[pin_id + 1][states.index(True)]
-        pull = self.current_config[pin_id]["pull"]
-        config = {"mode": mode, "pull": pull}
-        for var in self.IO_CONFIG_PARAMS.get(mode, []):
-            config[var["name"]] = ""
-        self.current_config[pin_id] = config
+        previous = self.current_config[pin_id]
+        if mode != previous["mode"]:  # unchanged choice: nothing to touch, nothing to mark dirty
+            self.current_config[pin_id] = self._with_defaults({"mode": mode, "pull": previous["pull"]}, previous)
         for key in [k for k in _errors if k.startswith("IO%s " % (pin_id + 1))]:
             _errors.pop(key)  # the fields those errors referred to are gone
         self.bgroup = []
         self.configure_io(None, pin_id)
 
     def _select_pull(self, button, pin_id):
-        elements = [urwid.Text("Pull for IO{}".format(pin_id + 1)), urwid.Divider()]
+        elements = [urwid.Text(("title", "Pull for IO{}".format(pin_id + 1))), urwid.Divider()]
         self.bgroup = []
         for choice in self.IO_PULL_OPTIONS:
             elements.append(
@@ -1239,7 +1236,7 @@ class IOTab(object):
         self.configure_io(None, pin_id)
 
     def _select_wakeup(self, button, pin_id):
-        elements = [urwid.Text("Select Wakeup Option"), urwid.Divider()]
+        elements = [urwid.Text(("title", "Select Wakeup Option")), urwid.Divider()]
         self.bgroup = []
         for choice in self.IO_CONFIG_PARAMS["DIGITAL_IN"][0]["options"]:
             elements.append(
@@ -1276,7 +1273,20 @@ class IOTab(object):
         self.configure_io(None, pin_id)
 
     def _get_device_config(self, *args):
-        return [service.get_io_config(i + 1) for i in range(self.IO_PINS_COUNT)]
+        return [self._with_defaults(service.get_io_config(i + 1)) for i in range(self.IO_PINS_COUNT)]
+
+    def _with_defaults(self, config, previous=None):
+        """Every parameter of the mode present: kept from *previous* when it has the
+        same name, else the device value, else its minimum / first option. The
+        baseline is taken from this, so opening a screen never counts as an edit."""
+        config = dict(config)
+        for var in self.IO_CONFIG_PARAMS.get(config.get("mode"), []):
+            name = var["name"]
+            value = (previous or {}).get(name, config.get(name, ""))
+            if value == "":
+                value = var["options"][0] if var.get("type") == "enum" else var.get("min", "")
+            config[name] = value
+        return config
 
     def _apply_settings(self, button, pin_id):
         pins = range(self.IO_PINS_COUNT) if pin_id >= self.IO_PINS_COUNT else [pin_id]
@@ -1318,12 +1328,12 @@ class BatteryProfileTab(object):
 
     def main(self, *args):
         elements = [
-            urwid.Text("Battery settings"),
+            urwid.Text(("title", "Battery settings")),
             urwid.Divider(),
             urwid.Text("Status: " + self.status_text),
             urwid.Padding(
                 attrmap(
-                    ActionButton(
+                    MenuButton(
                         "Profile: {}".format(profile_label(self.profile_name)),
                         on_press=self.select_profile,
                     )
@@ -1452,7 +1462,7 @@ class BatteryProfileTab(object):
                 [
                     urwid.Padding(
                         attrmap(
-                            ActionButton(
+                            MenuButton(
                                 "Chemistry:              {}".format(
                                     self.CHEMISTRY_OPTIONS[self.chemistries_idx]
                                 ),
@@ -1545,7 +1555,7 @@ class BatteryProfileTab(object):
                 urwid.Divider(),
                 urwid.Padding(
                     attrmap(
-                        ActionButton(
+                        MenuButton(
                             "Temperature sense: {}".format(
                                 self.TEMP_SENSE_OPTIONS[self.temp_sense_profile_idx]
                             ),
@@ -1562,7 +1572,7 @@ class BatteryProfileTab(object):
                 [
                     urwid.Padding(
                         attrmap(
-                            ActionButton(
+                            MenuButton(
                                 "Rsoc estimation: {}".format(
                                     self.RSOC_ESTIMATION_OPTIONS[
                                         self.rsoc_estimation_profile_idx
@@ -1657,7 +1667,7 @@ class BatteryProfileTab(object):
         self.main()
 
     def select_sense(self, *args):
-        body = [urwid.Text("Select temperature sense"), urwid.Divider()]
+        body = [urwid.Text(("title", "Select temperature sense")), urwid.Divider()]
         self.bgroup = []
         for choice in self.TEMP_SENSE_OPTIONS:
             button = urwid.RadioButton(self.bgroup, choice)
@@ -1674,7 +1684,7 @@ class BatteryProfileTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def select_rsoc_estimate(self, *args):
-        body = [urwid.Text("Select Rsoc estimation"), urwid.Divider()]
+        body = [urwid.Text(("title", "Select Rsoc estimation")), urwid.Divider()]
         self.bgroup = []
         for choice in self.RSOC_ESTIMATION_OPTIONS:
             button = urwid.RadioButton(self.bgroup, choice)
@@ -1692,7 +1702,7 @@ class BatteryProfileTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(body))
 
     def select_chemistry(self, *args):
-        body = [urwid.Text("Select Chemistry"), urwid.Divider()]
+        body = [urwid.Text(("title", "Select Chemistry")), urwid.Divider()]
         self.bgroup = []
         for choice in self.CHEMISTRY_OPTIONS:
             button = urwid.RadioButton(self.bgroup, choice)
@@ -2015,7 +2025,7 @@ class SystemTaskTab(object):
 
     def main(self, *args):
         global pijuiceConfigData
-        elements = [urwid.Text("System Task"), urwid.Divider()]
+        elements = [urwid.Text(("title", "System Task")), urwid.Divider()]
 
         ## System Task ##
         if not ("system_task" in pijuiceConfigData):
@@ -2259,8 +2269,7 @@ class SystemTaskTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def refresh(self, *args):
-        section = _CONFIG_SECTIONS[_last_choice]
-        pijuiceConfigData[section] = loadPiJuiceConfig().get(section, {})
+        _reload_sections()
         self.main()
         _saved_draft()
         _flash("Saved settings reloaded.", "ok")
@@ -2383,7 +2392,9 @@ class SystemEventsTab(object):
 
     def main(self, *args):
         global pijuiceConfigData
-        elements = [urwid.Text("System Events"), urwid.Divider()]
+        elements = [urwid.Text(("title", "System Events")),
+                    urwid.Text(("muted", "Tick an event, then choose what the service does when it happens.")), urwid.Divider()]
+        names = user_function_names(loadPiJuiceConfig())
 
         for i, event in enumerate(self.EVENTS):
             eventchkbox = urwid.CheckBox(
@@ -2394,10 +2405,11 @@ class SystemEventsTab(object):
             )
             eventitem = attrmap(eventchkbox)
             func = pijuiceConfigData["system_events"][event]["function"]
+            label = function_label(func, names)
             fbutton = attrmap(
-                ActionButton(func, on_press=self.set_function, user_data=[i, func])
+                MenuButton(label, on_press=self.set_function, user_data=[i, func])
             )
-            ftext = attrmap(urwid.Text("  " + func))
+            ftext = attrmap(urwid.Text(("muted", "  " + label)))
             funcitem = fbutton if eventchkbox.state else ftext
             row = urwid.Columns(
                 [urwid.Padding(eventitem, width=25), urwid.Padding(funcitem, width=25)]
@@ -2423,8 +2435,7 @@ class SystemEventsTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def refresh(self, *args):
-        section = _CONFIG_SECTIONS[_last_choice]
-        pijuiceConfigData[section] = loadPiJuiceConfig().get(section, {})
+        _reload_sections()
         self.main()
         _saved_draft()
         _flash("Saved settings reloaded.", "ok")
@@ -2438,15 +2449,13 @@ class SystemEventsTab(object):
         index = data[0]
         func = data[1]
         elements = [
-            urwid.Text("Select function for '" + self.EVTTXT[index] + "'"),
+            urwid.Text(("title", "Action for " + self.EVTTXT[index])),
             urwid.Divider(),
         ]
         self.functions = self.FUNCTIONS1 if index < 3 else self.FUNCTIONS2
         self.bgroup = []
-        for function in self.functions:
-            button = attrmap(urwid.RadioButton(self.bgroup, function))
-            elements.append(button)
-        self.bgroup[self.functions.index(func)].toggle_state()
+        elements += function_choices(self.bgroup, self.functions)
+        self.bgroup[self.functions.index(func) if func in self.functions else 0].toggle_state()
         elements.extend(
             [
                 urwid.Divider(),
@@ -2492,9 +2501,9 @@ class FileNavigator(object):
 
     def show(self):
         elements = [
-            urwid.Text("Select script  [" + self.cur + "]"),
+            urwid.Text(("title", "Select script  [" + self.cur + "]")),
             urwid.Divider(),
-            attrmap(ActionButton("../", on_press=self._go, user_data="..")),
+            attrmap(MenuButton("../", on_press=self._go, user_data="..")),
         ]
         try:
             entries = sorted(
@@ -2509,7 +2518,7 @@ class FileNavigator(object):
                 is_dir = False
             elements.append(
                 attrmap(
-                    ActionButton(
+                    (MenuButton if is_dir else ActionButton)(
                         e.name + ("/" if is_dir else ""),
                         on_press=self._go,
                         user_data=e.name,
@@ -2562,37 +2571,29 @@ USER_FUNCS_TOTAL = 15
 class UserScriptsTab(object):
     def __init__(self, *args):
         global pijuiceConfigData
-        if not ("user_functions" in pijuiceConfigData):
-            pijuiceConfigData["user_functions"] = {}
+        pijuiceConfigData.setdefault("user_functions", {})
+        pijuiceConfigData.setdefault("user_function_names", {})
         for i in range(USER_FUNCS_TOTAL):
-            fkey = "USER_FUNC" + str(i + 1)
-            if not (fkey in pijuiceConfigData["user_functions"]):
-                pijuiceConfigData["user_functions"][fkey] = ""
+            pijuiceConfigData["user_functions"].setdefault("USER_FUNC" + str(i + 1), "")
         self.main()
 
     def main(self, *args):
         global pijuiceConfigData
         elements = [
-            urwid.Text("User Scripts  (Enter on a slot to browse for a script)"),
+            urwid.Text(("title", "User Scripts")),
+            urwid.Text(("muted", "Name shows in Buttons and System Events. Enter on a path browses for a script.")),
             urwid.Divider(),
+            urwid.Columns([(4, urwid.Text(("muted", "#"))), (20, urwid.Text(("muted", "Name"))), urwid.Text(("muted", "Script (absolute path)"))], dividechars=1),
         ]
 
         for i in range(USER_FUNCS_TOTAL):
-            flabel = "USER FUNC" + str(i + 1) + ": "
             fkey = "USER_FUNC" + str(i + 1)
-            edititem = ScriptEdit(
-                flabel, edit_text=pijuiceConfigData["user_functions"][fkey]
-            )
-            urwid.connect_signal(
-                edititem,
-                "change",
-                self.updatetext,
-                user_args=[
-                    fkey,
-                ],
-            )
+            name_edit = urwid.Edit("", edit_text=pijuiceConfigData["user_function_names"].get(fkey, ""), wrap="clip")
+            urwid.connect_signal(name_edit, "change", self.updatename, user_args=[fkey])
+            edititem = ScriptEdit("", edit_text=pijuiceConfigData["user_functions"][fkey], wrap="clip")
+            urwid.connect_signal(edititem, "change", self.updatetext, user_args=[fkey])
             edititem.set_on_browse(lambda e=edititem, k=fkey: self._browse(k, e))
-            elements.append(attrmap(edititem))
+            elements.append(urwid.Columns([(4, urwid.Text("%2d" % (i + 1))), (20, attrmap(name_edit)), attrmap(edititem)], dividechars=1))
         elements.append(urwid.Divider())
 
         ## Footer ##
@@ -2613,8 +2614,13 @@ class UserScriptsTab(object):
         main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(elements))
 
     def updatetext(self, key, widget, text):
-        global pijuiceConfigData
         pijuiceConfigData["user_functions"][key] = text
+
+    def updatename(self, key, widget, text):
+        if text.strip():
+            pijuiceConfigData["user_function_names"][key] = text.strip()
+        else:
+            pijuiceConfigData["user_function_names"].pop(key, None)
 
     def _browse(self, fkey, edititem):
         FileNavigator(
@@ -2623,8 +2629,7 @@ class UserScriptsTab(object):
         )
 
     def refresh(self, *args):
-        section = _CONFIG_SECTIONS[_last_choice]
-        pijuiceConfigData[section] = loadPiJuiceConfig().get(section, {})
+        _reload_sections()
         self.main()
         _saved_draft()
         _flash("Saved settings reloaded.", "ok")
@@ -2685,7 +2690,7 @@ class SettingsTab(object):
     def main(self, *args):
         cli = pijuiceConfigData.setdefault("cli_settings", {})
         elements = [
-            urwid.Text("Settings"),
+            urwid.Text(("title", "Settings")),
             urwid.Divider(),
             attrmap(
                 urwid.CheckBox(
@@ -2714,7 +2719,7 @@ class SettingsTab(object):
         else:
             pijuiceConfigData["cli_settings"]["vim_keys"] = previous
             checkbox.set_state(previous, do_callback=False)
-        _update_title()
+        _render_header()
 
 
 class CyclingListBox(urwid.ListBox):
@@ -2767,7 +2772,7 @@ def menu(choices):
     body = [urwid.Text(("muted", "Choose a section. Drafts stay here until you apply or discard them.")), urwid.Divider()]
     for choice in choices:
         if choice:
-            button = ActionButton(choice)
+            button = MenuButton(choice)
             urwid.connect_signal(button, "click", item_chosen, user_args=[choice])
             description = MENU_HELP.get(choice, "")
             if choice in _drafts:
@@ -2779,7 +2784,7 @@ def menu(choices):
 
 
 def item_chosen(choice, button=None):
-    global _location, _dirty, _last_choice, _active_tab, _errors, _baseline
+    global _location, _dirty, _last_choice, _active_tab, _errors, _baseline, _section_title
     if choice == "Exit":
         return exit_program()
     _location = _last_choice = choice
@@ -2796,6 +2801,7 @@ def item_chosen(choice, button=None):
             _active_tab = menu_mapping[choice]()
             _baseline = _snapshot()
             _dirty = False
+        _section_title = _screen_title()
         _render_header()
     except Exception as exc:
         _active_tab = None
@@ -2810,7 +2816,7 @@ def main_menu(*args):
     _active_tab = None
     _dirty = False
     _errors = {}
-    _location = "PiJuice HAT Configuration"
+    _location = ROOT_TITLE
     m = menu(choices)
     if _last_choice is not None:  # land on the item we came from
         for i, w in enumerate(m.body):
@@ -2849,17 +2855,16 @@ def savePiJuiceConfig(*args):
     if _errors:
         _flash(next(iter(_errors.values())), "error")
         return
-    section = _CONFIG_SECTIONS.get(_last_choice)
-    if not section:
+    sections = _CONFIG_SECTIONS.get(_last_choice)
+    if not sections:
         _flash("Open a settings section before saving.", "warning")
         return
-    value = copy.deepcopy(pijuiceConfigData.get(section, {}))
+    values = {s: copy.deepcopy(pijuiceConfigData.get(s, {})) for s in sections}
     try:
-        if section == "user_functions":
-            for key, path in value.items():
-                if path and (not os.path.isabs(path) or not os.path.isfile(path)):
-                    raise ValueError("%s: choose an existing script using its full path." % key)
-        rc = service.save_section(section, value)
+        for key, path in values.get("user_functions", {}).items():
+            if path and (not os.path.isabs(path) or not os.path.isfile(path)):
+                raise ValueError("%s: choose an existing script using its full path." % key)
+        rc = service.save_sections(**values)
     except Exception as exc:
         _flash("Could not save: %s. Your edits are kept; retry with F5." % exc, "error")
         return
@@ -2934,7 +2939,25 @@ _active_tab = None
 _baseline = None
 _errors = {}
 _notice = ("muted", "Ready")
-_CONFIG_SECTIONS = {"System Task": "system_task", "System Events": "system_events", "User Scripts": "user_functions"}
+_CONFIG_SECTIONS = {"System Task": ("system_task",), "System Events": ("system_events",),
+                    "User Scripts": ("user_functions", "user_function_names")}
+
+
+def function_choices(group, functions):
+    """Radio rows for a function chooser: readable label, description underneath."""
+    config = loadPiJuiceConfig()
+    names = user_function_names(config)
+    rows = []
+    for function in functions:
+        rows.append(attrmap(urwid.RadioButton(group, function_label(function, names))))
+        rows.append(urwid.Padding(urwid.Text(("muted", function_description(function, config))), left=6))
+    return rows
+
+
+def _reload_sections():
+    saved = loadPiJuiceConfig()
+    for section in _CONFIG_SECTIONS.get(_last_choice, ()):
+        pijuiceConfigData[section] = saved.get(section, {})
 
 
 def _snapshot():
@@ -2942,8 +2965,9 @@ def _snapshot():
         return copy.deepcopy({key: getattr(_active_tab, key, None) for key in (
             "profile_name", "profile_data", "ext_profile_data", "temp_sense_profile_idx",
             "rsoc_estimation_profile_idx", "chemistries_idx", "custom_values")})
-    section = _CONFIG_SECTIONS.get(_last_choice)
-    return copy.deepcopy(pijuiceConfigData.get(section, {}) if section else getattr(_active_tab, "current_config", None))
+    sections = _CONFIG_SECTIONS.get(_last_choice)
+    return copy.deepcopy({s: pijuiceConfigData.get(s, {}) for s in sections} if sections
+                         else getattr(_active_tab, "current_config", None))
 
 
 def _saved_draft():
@@ -2955,9 +2979,21 @@ def _saved_draft():
     _render_header()
 
 
-def _flash(message, style="muted"):
-    global _notice
+_NOTICE_TTL = {"ok": 3, "muted": 3, "warning": 6, "error": 10}
+_notice_token = 0
+
+
+def _flash(message, style="muted", ttl=None):
+    """Show a footer notice that clears itself after a few seconds."""
+    global _notice, _notice_token
     _notice = (style, message)
+    _notice_token += 1
+    token = _notice_token
+    if message and loop is not None:
+        def clear(_loop, _data):
+            if _notice_token == token:
+                _flash("")
+        loop.set_alarm_in(_NOTICE_TTL.get(style, 3) if ttl is None else ttl, clear)
     _render_header()
 
 
@@ -2969,9 +3005,9 @@ def discard_draft(*args):
         global _dirty, _active_tab, pijuiceConfigData
         if hasattr(_active_tab, "alarm_handle") and loop:
             loop.remove_alarm(_active_tab.alarm_handle)
-        section = _CONFIG_SECTIONS.get(choice)
-        if section:
-            pijuiceConfigData[section] = loadPiJuiceConfig().get(section, {})
+        saved = loadPiJuiceConfig()
+        for section in _CONFIG_SECTIONS.get(choice, ()):
+            pijuiceConfigData[section] = saved.get(section, {})
         _dirty = False
         _active_tab = None
         _drafts.pop(choice, None)
@@ -3029,17 +3065,65 @@ _vim_pending_g = False
 _VIM_MOTIONS = {
     "j": "down",
     "k": "up",
-    "h": "left",
-    "l": "right",
     "G": "end",
     "ctrl f": "page down",
     "ctrl b": "page up",
+    "ctrl d": "page down",
+    "ctrl u": "page up",
 }
+# Synthetic keys: consumed by input_filter, never reach a widget. The vim
+# mapping is pure; the filter resolves each one with the focused widget.
+BACK = "__back__"
+OPEN = "__open__"
+HLEFT, HRIGHT = "__hleft__", "__hright__"  # Left/Right outside a text field (vim h/l)
+ROW_HOME, ROW_END = "__0__", "__$__"          # first/last field, or cursor start/end in a field
+FIELD_PREV, FIELD_NEXT, WORD_END = "__b__", "__w__", "__e__"
+EDIT_X, INSERT_START, INSERT_END = "__x__", "__I__", "__A__"
+_VIM_SENTINELS = {"0": ROW_HOME, "^": ROW_HOME, "$": ROW_END, "b": FIELD_PREV, "w": FIELD_NEXT,
+                  "e": WORD_END, "x": EDIT_X, "I": INSERT_START, "A": INSERT_END}
+
+KEYS = [  # (keys, action); vim rows are shown only when vim keybindings are on
+    ("Up / Down", "row up / down"),
+    ("Home / End, PgUp / PgDn", "first / last row, page"),
+    ("Right", "next field in the row; at its end, open the focused › entry"),
+    ("Left", "previous field in the row; at its start, back"),
+    ("Tab / Shift-Tab", "next / previous field, continuing into the next row"),
+    ("Enter, Space", "press a button, toggle a box, pick an option"),
+    ("Esc, Backspace, q", "back; q at the main menu quits"),
+    ("F5 / F6 / F8", "apply / discard / reload the service"),
+    ("F10, Q", "quit (asks when drafts exist)"),
+    ("?", "this list"),
+    ("in a text field", "Left/Right/Home/End move the cursor; Esc leaves the field"),
+]
+KEYS_VIM = [
+    ("j / k", "row down / up"),
+    ("h / l", "like Left / Right"),
+    ("0 or ^ / $", "first / last field in the row"),
+    ("b / w, e", "previous / next field"),
+    ("gg / G", "first / last row"),
+    ("ctrl-u / ctrl-d, ctrl-b / ctrl-f", "page up / down"),
+    ("i, a, I, A", "edit the focused field: INSERT at the cursor / after it / at the start / at the end"),
+    ("in a field, NORMAL", "0 ^ $ b w e move the cursor by word, x deletes a character, other keys do nothing"),
+    ("Esc", "INSERT back to NORMAL"),
+]
+
+
+def show_keys(*_args):
+    rows = [urwid.Text(("title", "Keys")), urwid.Divider()]
+    table = KEYS + ([("", ""), ("Vim", "")] + KEYS_VIM if VIM_ENABLED else [])
+    for keys, action in table:
+        rows.append(urwid.Columns([(20, urwid.Text(("value", keys))), urwid.Text(action)], dividechars=2))
+    rows += [urwid.Divider(), attrmap(ActionButton("Back", on_press=lambda *_a: _restore_view(*previous)))]
+    previous = (main.original_widget, _current_back, _location)
+    main.original_widget = CyclingListBox(urwid.SimpleFocusListWalker(rows))
 
 
 def _mark_dirty(*args):
+    """Any widget change: compare against the baseline rather than assume an edit,
+    so a chooser that re-selects the current value never creates a draft."""
     global _dirty
-    _dirty = True
+    if _active_tab is not None and not _in_dialog:
+        _dirty = _snapshot() != _baseline or bool(_errors)
     _render_header()
 
 
@@ -3086,50 +3170,120 @@ class _ContentArea(urwid.Padding):
         if isinstance(widget, urwid.Filler) and isinstance(widget.original_widget, urwid.Pile):
             widget = CyclingListBox(urwid.SimpleFocusListWalker([row for row, _options in widget.original_widget.contents]))
         back = None if _suppress_hoist else _hoist_back(widget)
+        if not _suppress_hoist:
+            _remember_focus(getattr(self, "_original_widget", None))
+            _restore_focus(widget)
         self._original_widget = widget
         self._invalidate()
         if not _suppress_hoist:
             _on_view_changed(back)
 
 
+_focus_memory = {}  # (section, screen title) -> row index, so "back" lands where you left
+
+
+def _listbox_of(widget):
+    while widget is not None and not isinstance(widget, urwid.ListBox):
+        widget = getattr(widget, "original_widget", None)
+    return widget
+
+
+def _remember_focus(widget):
+    listbox = _listbox_of(widget)
+    if listbox is not None and listbox.body:
+        _focus_memory[(_last_choice, _screen_title(widget))] = listbox.focus_position
+
+
+def _restore_focus(widget):
+    """Back to a screen: the row you came from. First visit: the first usable row."""
+    listbox = _listbox_of(widget)
+    if listbox is None or not listbox.body:
+        return
+    pos = _focus_memory.get((_last_choice, _screen_title(widget)))
+    if pos is not None and pos < len(listbox.body) and listbox.body[pos].selectable():
+        listbox.set_focus(pos)
+    elif isinstance(listbox, CyclingListBox):
+        listbox._focus_edge(from_top=True)
+
+
 def _on_view_changed(back):
-    global _current_back
+    global _current_back, _notice
     _current_back = back
+    if _notice[0] in ("ok", "muted"):
+        _notice = ("muted", "")  # a confirmation belongs to the screen it was made on
     _render_header()
 
 
-class _BareButton(urwid.Button):
-    """Button without the global [ ] chrome -- used for the header back control."""
+ROOT_TITLE = "PiJuice HAT Configuration"
+_section_title = None  # title of the section's first screen; deeper screens add a crumb
 
-    button_left = urwid.Text("")
-    button_right = urwid.Text("")
+
+def _screen_title(widget=None):
+    """The ('title', ...) text at the top of a screen (default: the current one)."""
+    if widget is None:
+        widget = main.original_widget if main is not None else None
+    widget = _listbox_of(widget)
+    if widget is None or not widget.body:
+        return None
+    row = getattr(widget.body[0], "base_widget", widget.body[0])
+    if isinstance(row, urwid.Text):
+        text, attrs = row.get_text()
+        if attrs and attrs[0][0] == "title":
+            return text.strip().splitlines()[0]
+    return None
+
+
+def _breadcrumb():
+    crumbs = [ROOT_TITLE]
+    if _active_tab is not None and _last_choice:
+        crumbs.append(_last_choice)
+    title = _screen_title()
+    if title and title != _section_title and title not in crumbs:
+        crumbs.append(title)
+    return " › ".join(crumbs)
 
 
 def _render_header():
     if frame is None:
         return
-    cols = []
-    if _current_back is not None:
-        back_btn = _BareButton("← back", on_press=go_back)  # arrow cues left/h
-        cols.append((10, urwid.AttrMap(back_btn, "nav", focus_map="button_focus")))
-    title = _location + ("  • Unsaved" if _dirty else "")
+    title = _breadcrumb() + ("  • Unsaved" if _dirty else "")
     if _drafts:
         title += "  • %d draft%s" % (len(_drafts), "s" if len(_drafts) != 1 else "")
-    cols.append(urwid.AttrMap(urwid.Text(title), "title"))
-    frame.header = urwid.Pile([urwid.Columns(cols, dividechars=1), urwid.Divider()])
-    hint = "↑↓/Tab Move  Enter Select  Esc Back  F5 Apply  F6 Discard  F8 Reload  F10 Quit"
+    frame.header = urwid.Pile([urwid.AttrMap(urwid.Text(title), "title"), urwid.Divider()])
+    cols = []
     if VIM_ENABLED:
-        hint = ("Vim INSERT: Esc Normal  " if _vim_mode == "insert" else "Vim: j/k Move  i Edit  ") + hint
-    frame.footer = urwid.Pile([urwid.Divider(), urwid.Text(_notice), urwid.Text(("muted", hint))])
+        chip = ("warning", " INSERT ") if _vim_mode == "insert" else ("nav", " NORMAL ")
+        cols.append((8, urwid.Text(chip)))
+    cols += [urwid.Text(_notice), (6, urwid.Text(("muted", "? keys"), align="right"))]
+    frame.footer = urwid.Pile([urwid.Divider(), urwid.Columns(cols, dividechars=1)])
+    _fit_window()
 
 
-def _update_title():
-    if linebox is None:
+_overlay = None  # the centred window; resized to the content like raspi-config
+
+
+def _content_rows(widget, width):
+    while widget is not None and not isinstance(widget, urwid.ListBox):
+        widget = getattr(widget, "original_widget", None)
+    if widget is None:
+        return 12
+    return sum(row.rows((width,)) for row in widget.body)
+
+
+def _fit_window():
+    """Size the window to its content: wide enough to read, no taller than needed."""
+    if _overlay is None or loop is None:
         return
-    if VIM_ENABLED and _vim_mode == "insert":
-        linebox.set_title("PiJuice CLI  -- INSERT --")
-    else:
-        linebox.set_title("PiJuice CLI")
+    try:
+        cols, rows = loop.screen.get_cols_rows()
+    except Exception:
+        return
+    if not isinstance(cols, int) or not isinstance(rows, int):
+        return
+    width = min(cols - 2, 78)
+    body = _content_rows(main.original_widget, width - 6)  # linebox + 2-col padding each side
+    height = max(12, min(rows - 2, body + 6))  # header 2, footer 2, box 2
+    _overlay.set_overlay_parameters("center", width, "middle", height)
 
 
 def go_back(*args):
@@ -3184,44 +3338,83 @@ def vim_translate(keys, mode, editable, pending_g):
         if key in ("i", "a") and editable:
             want_insert = True
             mode = "insert"
+        elif key == "h":
+            out.append(HLEFT)
+        elif key == "l":
+            out.append(HRIGHT)
+        elif key == "q":
+            out.append(BACK)
         elif key in _VIM_MOTIONS:
             out.append(_VIM_MOTIONS[key])
-        elif editable and len(key) == 1 and key.isprintable():
-            pass  # swallow: normal-mode keys must not get typed into the field
+        elif key in _VIM_SENTINELS:
+            if key in ("x", "I", "A") and not editable:
+                continue  # editing keys mean nothing outside a field
+            out.append(_VIM_SENTINELS[key])
+        elif editable and (key in ("backspace", "delete") or (len(key) == 1 and key.isprintable())):
+            pass  # swallow: normal-mode keys must not edit the field
         else:
             out.append(key)
     return out, mode, pending_g, want_insert
 
 
+def _word_motion(text, pos, op):
+    """Cursor position after a vim word motion on *text*: w, b or e."""
+    words = [(m.start(), m.end()) for m in re.finditer(r"\w+|[^\w\s]+", text)]
+    if op == "w":
+        return next((start for start, _end in words if start > pos), len(text))
+    if op == "e":
+        return next((end - 1 for _start, end in words if end - 1 > pos), len(text))
+    return next((start for start, _end in reversed(words) if start < pos), 0)
+
+
 def input_filter(keys, raw):
+    """Menus open and close like a menu bar: Right (vim l) opens the focused menu
+    item, Left/Esc/Backspace/q (vim h) close it and go back; Enter presses,
+    toggles or picks. Tab moves across a row, then down. Keys that would type
+    into or move within a focused text field are left alone."""
     global _vim_mode, _vim_pending_g
-    editable = _focus_is_editable(loop.widget)
+    editable = _focus_is_editable(frame)
     out = []
     for key in keys:
-        if key in ("f5", "f6", "f8", "f10"):
+        if key in ("f5", "f6", "f8", "f10") or (key == "Q" and not editable):
             if _in_dialog:
                 continue
-            {"f5": apply_draft, "f6": discard_draft, "f8": retry_service_reload, "f10": exit_program}[key]()
+            {"f5": apply_draft, "f6": discard_draft, "f8": retry_service_reload, "f10": exit_program, "Q": exit_program}[key]()
             continue
-        if key == "tab":
-            key = "down"
-        elif key == "shift tab":
-            key = "up"
-        # Esc only special in vim insert mode (-> normal); otherwise it falls
-        # through to unhandled_input, which does cancel/back/quit.
-        if key == "esc" and VIM_ENABLED and _vim_mode == "insert":
-            _vim_mode = "normal"
-            _update_title()
+        if key == "?" and not editable and not _in_dialog:
+            show_keys()
             continue
-        if not VIM_ENABLED:
-            out.append(key)
-            continue
-        mapped, _vim_mode, _vim_pending_g, want_insert = vim_translate(
-            [key], _vim_mode, editable, _vim_pending_g
-        )
-        if want_insert:
-            _update_title()
-        out.extend(mapped)
+        if key in ("tab", "shift tab"):
+            key = _tab_key(key == "tab")
+        elif key in ("left", "right") and not editable and not _in_dialog:
+            key = HLEFT if key == "left" else HRIGHT
+        if VIM_ENABLED:
+            if key == "esc" and _vim_mode == "insert":
+                _vim_mode = "normal"
+                _render_header()
+                continue
+            mapped, _vim_mode, _vim_pending_g, want_insert = vim_translate(
+                [key], _vim_mode, editable, _vim_pending_g)
+            if want_insert:
+                _render_header()
+        else:
+            mapped = [BACK if (key in ("q", "backspace") and not editable) else key]
+        for mapped_key in mapped:
+            if mapped_key in (ROW_HOME, ROW_END, FIELD_PREV, FIELD_NEXT, WORD_END, EDIT_X, INSERT_START, INSERT_END):
+                out.extend(_resolve_vim(mapped_key, editable))
+                continue
+            if mapped_key in (HLEFT, HRIGHT):
+                # Across a row first (like a menu bar); at its edge Left closes, Right opens.
+                if _can_move_in_row(mapped_key == HRIGHT):
+                    out.append("right" if mapped_key == HRIGHT else "left")
+                    continue
+                mapped_key = OPEN if mapped_key == HRIGHT else BACK
+            if mapped_key == BACK or mapped_key == "esc":
+                _back_or_exit()
+            elif mapped_key == OPEN:
+                _open_focused()
+            else:
+                out.append(mapped_key)
     def track(_loop, _data):
         global _dirty
         if _active_tab is not None and not _in_dialog:
@@ -3231,30 +3424,107 @@ def input_filter(keys, raw):
     return out
 
 
-def unhandled_input(key):
-    # Reached only when no widget consumed the key. 'left' here means focus is at
-    # the left edge (vertical list, or leftmost column) -> go back. Esc -> back/quit.
-    if key == "left":
-        go_back()
-    elif key == "esc":
-        _back_or_exit()
+def _focus_leaf(widget):
+    for _ in range(50):
+        child = getattr(widget, "focus", None) or getattr(widget, "original_widget", None)
+        if child is None or child is widget:
+            return getattr(widget, "base_widget", widget)
+        widget = child
+    return widget
+
+
+def _is_menu_button(widget):
+    return isinstance(widget, MenuButton)
+
+
+def _open_focused():
+    if _in_dialog:
+        return
+    leaf = _focus_leaf(frame)
+    if _is_menu_button(leaf):
+        urwid.emit_signal(leaf, "click", leaf)
+
+
+def _focus_columns(widget):
+    """The innermost Columns on the focus chain, or None."""
+    found = None
+    for _ in range(50):
+        if isinstance(widget, urwid.Columns):
+            found = widget
+        child = getattr(widget, "focus", None) or getattr(widget, "original_widget", None)
+        if child is None or child is widget:
+            return found
+        widget = child
+    return found
+
+
+def _resolve_vim(op, editable):
+    """Row-level meaning on a row of fields, cursor-level meaning inside a field."""
+    global _vim_mode
+    if editable:
+        edit = _focus_leaf(frame)
+        text, pos = edit.edit_text, edit.edit_pos
+        if op in (ROW_HOME, INSERT_START):
+            edit.set_edit_pos(0)
+        elif op in (ROW_END, INSERT_END):
+            edit.set_edit_pos(len(text))
+        elif op == EDIT_X:
+            if pos < len(text):
+                edit.set_edit_text(text[:pos] + text[pos + 1:])
+                edit.set_edit_pos(pos)
+        else:
+            edit.set_edit_pos(_word_motion(text, pos, {FIELD_PREV: "b", FIELD_NEXT: "w", WORD_END: "e"}[op]))
+        if op in (INSERT_START, INSERT_END):
+            _vim_mode = "insert"
+            _render_header()
+        return []
+    if op in (ROW_HOME, ROW_END):
+        columns = _focus_columns(frame)
+        if columns is not None:
+            usable = [i for i, (w, _o) in enumerate(columns.contents) if w.selectable()]
+            if usable:
+                columns.focus_position = usable[0] if op == ROW_HOME else usable[-1]
+        return []
+    if op in (FIELD_PREV, FIELD_NEXT, WORD_END):
+        return [_tab_key(op != FIELD_PREV)]
+    return []
+
+
+def _can_move_in_row(forward):
+    """Is there a usable field beside the focus in its row?"""
+    columns = _focus_columns(frame)
+    if columns is None:
+        return False
+    i = columns.focus_position
+    rest = columns.contents[i + 1:] if forward else columns.contents[:i]
+    return any(w.selectable() for w, _opts in rest)
+
+
+def _tab_key(forward):
+    """Tab walks a row's fields before moving to the next row."""
+    if _can_move_in_row(forward):
+        return "right" if forward else "left"
+    return "down" if forward else "up"
 
 
 def _selftest():
     assert vim_translate(["j"], "normal", False, False)[0] == ["down"]
     assert vim_translate(["k"], "normal", False, False)[0] == ["up"]
-    assert vim_translate(["h"], "normal", False, False)[0] == [
-        "left"
-    ]  # move/back-at-edge
-    assert vim_translate(["l"], "normal", False, False)[0] == [
-        "right"
-    ]  # move right (columns)
+    assert vim_translate(["h"], "normal", False, False)[0] == [HLEFT]
+    assert vim_translate(["q"], "normal", True, False)[0] == [BACK]
+    assert vim_translate(["l"], "normal", False, False)[0] == [HRIGHT]
+    assert vim_translate(["0", "$", "w", "b"], "normal", False, False)[0] == [ROW_HOME, ROW_END, FIELD_NEXT, FIELD_PREV]
+    assert vim_translate(["x", "A"], "normal", False, False)[0] == []  # editing keys need a field
+    assert vim_translate(["x", "backspace"], "normal", True, False)[0] == [EDIT_X]
+    assert _word_motion("/usr/local/bin/x.sh", 0, "w") == 1 and _word_motion("ab cd", 3, "b") == 0
+    assert _word_motion("ab cd", 0, "e") == 1 and _word_motion("ab cd", 4, "w") == 5
+    assert _is_menu_button(MenuButton("Buttons")) and not _is_menu_button(ActionButton("Apply settings"))
     out, m, p, ins = vim_translate(["g"], "normal", False, False)
     assert p is True and out == []
     assert vim_translate(["g"], "normal", False, True)[0] == ["home"]
     out, m, p, ins = vim_translate(["i"], "normal", True, False)
     assert ins is True and m == "insert" and out == []
-    assert vim_translate(["x"], "normal", True, False)[0] == []  # swallowed
+    assert vim_translate(["y"], "normal", True, False)[0] == []  # swallowed: no typing in normal mode
     assert vim_translate(["x"], "insert", True, False)[0] == ["x"]  # typed
     out, m, p, ins = vim_translate(["esc"], "insert", True, False)
     assert m == "normal" and out == []
@@ -3296,6 +3566,10 @@ def exit_cli(*args):
 
 
 class ResponsiveScreen(urwid.WidgetWrap):
+    @property
+    def focus(self):
+        return self._w
+
     def render(self, size, focus=False):
         if size[0] < 64 or size[1] < 12:
             return urwid.Filler(urwid.Text("PiJuice CLI\nResize to at least 64 columns × 12 rows.\nF10: quit", align="center")).render(size)
@@ -3316,7 +3590,7 @@ class ResponsiveScreen(urwid.WidgetWrap):
 
 
 def _build_and_run():
-    global main, frame, linebox, loop, pijuiceConfigData, _location, service
+    global main, frame, linebox, loop, pijuiceConfigData, _location, service, _overlay
     problem = None
     try:
         lock_file = open(LOCK_FILE, "w")  # noqa: F841 - held for the process lifetime
@@ -3345,23 +3619,15 @@ def _build_and_run():
 
     frame = urwid.Frame(body=main)
     linebox = urwid.LineBox(frame, title="PiJuice CLI")
-    top = urwid.Overlay(
-        linebox,
-        urwid.SolidFill(" "),
-        align="center",
-        width=("relative", 96),
-        min_width=64,
-        valign="middle",
-        height=("relative", 96),
-        min_height=12,
-    )
-    _render_header()
+    _overlay = urwid.Overlay(linebox, urwid.SolidFill(" "), align="center", width=78,
+                             valign="middle", height=24, min_width=64, min_height=12)
 
     loop = urwid.MainLoop(
-        ResponsiveScreen(top), palette=([(name, "standout" if name == "button_focus" else "default", "default") for name, *_rest in PALETTE]
+        ResponsiveScreen(_overlay), palette=([(name, "standout" if name == "button_focus" else "default", "default") for name, *_rest in PALETTE]
                       if "NO_COLOR" in os.environ else PALETTE),
-        input_filter=input_filter, unhandled_input=unhandled_input
+        input_filter=input_filter,
     )
+    _render_header()
     loop.run()
 
 

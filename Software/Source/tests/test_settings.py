@@ -319,6 +319,23 @@ class SettingsTests(unittest.TestCase):
         saved = json.loads(Path(self.service.config_path).read_text())
         self.assertEqual(saved['battery_management'], {'enabled': True, 'limit': 80, 'resume': 75})
 
+    def test_function_combos_show_names_and_scripts_save_them(self):
+        from pijuice_gtk import UserScriptsView
+        self.service.config['user_function_names'] = {'USER_FUNC1': 'Backup'}
+        view = self.view(ButtonsView)
+        row, _param = view._cells[('SW1', 'PRESS')]
+        strings = [row.get_model().get_string(i) for i in range(row.get_model().get_n_items())]
+        self.assertIn('Power on', strings)
+        self.assertIn('Backup', strings)
+        self.assertFalse(any('_' in s for s in strings), strings)
+        self.assertEqual(row.get_title(), 'Press')
+        scripts = self.view(UserScriptsView)
+        scripts._names['USER_FUNC2'].set_text('Lights')
+        scripts._on_apply(None)
+        drain()
+        saved = json.loads(Path(self.service.config_path).read_text())
+        self.assertEqual(saved['user_function_names'], {'USER_FUNC1': 'Backup', 'USER_FUNC2': 'Lights'})
+
     def test_status_switch_choice_is_not_a_draft_and_dialogs_do_not_stack(self):
         from pijuice_gtk import StatusView
         view = self.view(StatusView)

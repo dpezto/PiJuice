@@ -147,7 +147,7 @@ class CliTests(unittest.TestCase):
 
     def test_saving_one_json_section_does_not_save_another_draft(self):
         cli.item_chosen('User Scripts')
-        edit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w,urwid.Edit))
+        edit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w,cli.ScriptEdit))
         edit.set_edit_text('/tmp/not-yet-a-script')
         cli.go_back()
         cli.item_chosen('System Events')
@@ -249,6 +249,177 @@ class CliTests(unittest.TestCase):
         cli._active_tab.current_config['i2c_addr'] = 'zz'
         self.click('Apply settings')
         self.config.SetAddress.assert_called_once()
+
+    def test_user_script_names_are_saved_and_shown(self):
+        cli.item_chosen('User Scripts')
+        edits = [w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w, urwid.Edit)]
+        edits[0].set_edit_text('Backup')           # name of slot 1
+        edits[1].set_edit_text(str(Path(__file__)))  # an existing absolute path
+        with patch.object(pijuice_service, 'notify_service', return_value=0):
+            cli.savePiJuiceConfig()
+        saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
+        self.assertEqual(saved['user_function_names'], {'USER_FUNC1': 'Backup'})
+        self.assertEqual(saved['user_functions']['USER_FUNC1'], str(Path(__file__)))
+        cli.main_menu()
+        self.config.GetButtonConfiguration.return_value = ok({e: {'function': 'USER_FUNC1' if e == 'PRESS' else 'UNKNOWN', 'parameter': 100} for e in cli.PiJuiceConfig.buttonEvents})
+        cli.item_chosen('Buttons')
+        cli._active_tab.configure_sw(None, 'SW1')
+        labels = [w.label for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w, urwid.Button)]
+        self.assertTrue(any('Backup' in l for l in labels), labels)
+        self.assertFalse(any('_' in l for l in labels), labels)
+        cli._active_tab._set_function(None, {'sw_id': 'SW1', 'action': 'RELEASE'})  # UNKNOWN must not crash (#998)
+        self.assertTrue(cli._active_tab.bgroup[0].state)
+
+    def test_keys_back_and_quit_are_consistent(self):
+        cli.VIM_ENABLED = False
+        cli.item_chosen('LEDs')
+        cli._active_tab.configure_led(None, 0)
+        self.assertTrue(any(isinstance(w, urwid.Edit) for w in cli._walk_widgets(cli.main.original_widget)))
+        cli.input_filter(['q'], [])                       # q = back inside a section (LED D1 -> LED list)
+        self.assertIsNotNone(cli._active_tab)
+        self.assertFalse(any(isinstance(w, urwid.Edit) for w in cli._walk_widgets(cli.main.original_widget)))
+        cli.input_filter(['backspace'], [])               # backspace = back to the menu
+        self.assertIsNone(cli._active_tab)
+        with self.assertRaises(urwid.ExitMainLoop):
+            cli.input_filter(['q'], [])                   # q at the main menu = quit
+        cli.input_filter(['?'], [])                       # keys screen, Esc returns
+        self.assertIn('Keys', str(cli.main.original_widget.body[0].get_text()[0]))
+        cli.input_filter(['esc'], [])
+        self.assertIsNone(cli._active_tab)
+        for i, row in enumerate(cli.main.original_widget.body):   # Right on a menu entry opens it
+            if any(isinstance(b, urwid.Button) and b.label == 'LEDs' for b in cli._walk_widgets(row)):
+                cli.main.original_widget.set_focus(i)
+        self.assertEqual(cli.input_filter(['right'], []), [])
+        self.assertIsInstance(cli._active_tab, cli.LEDTab)
+        top = cli.ResponsiveScreen(urwid.Overlay(cli.linebox or urwid.LineBox(cli.frame), urwid.SolidFill(' '), 'center', 78, 'middle', 24))
+        cli.loop.widget = top                              # the real stack must not hide the focus
+        self.assertIsInstance(cli._focus_leaf(cli.frame), urwid.Button)
+        header = cli.frame.header.contents[0][0].base_widget.get_text()[0]
+        self.assertEqual(header, 'PiJuice HAT Configuration › LEDs')
+        cli._active_tab.configure_led(None, 0)
+        header = cli.frame.header.contents[0][0].base_widget.get_text()[0]
+        self.assertEqual(header, 'PiJuice HAT Configuration › LEDs › LED D1')
+        cli.input_filter(['left'], [])
+        listbox = cli.main.original_widget.original_widget   # LED list is padded
+        for i, row in enumerate(listbox.body):
+            if any(isinstance(b, urwid.Button) and b.label == 'Apply settings' for b in cli._walk_widgets(row)):
+                listbox.set_focus(i)
+        cli.input_filter(['right'], [])                   # Right on an action button does nothing
+        self.assertEqual(self.config.SetLedConfiguration.call_count, 0)
+        cli.input_filter(['left'], [])                    # Left closes: back to the menu
+        self.assertIsNone(cli._active_tab)
+        cli.item_chosen('System Events')                  # rows with fields: Left/Right/Tab walk them
+        cli.pijuiceConfigData['system_events']['low_charge']['enabled'] = True
+        cli._active_tab.main()
+        cli.main.original_widget.set_focus(3)
+        self.assertEqual(cli.input_filter(['tab'], []), ['right'])
+        self.assertEqual(cli.input_filter(['right'], []), ['right'])   # checkbox -> function button
+        cli.main.original_widget.body[3].focus_position = 1
+        self.assertEqual(cli.input_filter(['tab'], []), ['down'])
+        self.assertEqual(cli.input_filter(['shift tab'], []), ['left'])
+        self.assertEqual(cli.input_filter(['left'], []), ['left'])     # back across the row first
+        cli.main.original_widget.body[3].focus_position = 0
+        cli.input_filter(['left'], [])                    # at the row's start: back to the menu
+        self.assertIsNone(cli._active_tab)
+        cli.item_chosen('Buttons')                        # back lands where you left, not at the top
+        listbox = cli.main.original_widget
+        for i, row in enumerate(listbox.body):
+            if any(isinstance(b, urwid.Button) and b.label == 'SW3' for b in cli._walk_widgets(row)):
+                listbox.set_focus(i)
+        cli.input_filter(['right'], [])                   # open SW3
+        self.assertIn('SW3', str(cli._screen_title()))
+        cli.go_back()
+        listbox = cli.main.original_widget
+        focused = [b.label for b in cli._walk_widgets(listbox.body[listbox.focus_position]) if isinstance(b, urwid.Button)]
+        self.assertEqual(focused, ['SW3'])
+        cli.main_menu()
+        cli.item_chosen('User Scripts')
+        edit = next(w for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w, urwid.Edit))
+        cli.main.original_widget.set_focus(4)             # first script row
+        self.assertEqual(cli.input_filter(['q'], []), ['q'])  # typing q into a field stays typing
+        cli.VIM_ENABLED = True
+        cli._vim_mode = 'normal'
+        self.assertEqual(cli.input_filter(['l'], []), ['right'])  # vim l: name field -> path field in the row
+        cli.main.original_widget.body[4].focus_position = 1
+        cli.input_filter(['h'], [])                       # vim h at the row's start: back
+        self.assertIsNone(cli._active_tab)
+        cli.VIM_ENABLED = False
+
+    def test_vim_motions_on_rows_and_in_fields(self):
+        cli.VIM_ENABLED = True
+        cli._vim_mode = 'normal'
+        cli.item_chosen('System Events')                  # row of [checkbox, function ›]: 0/$/w/b hop fields
+        cli.pijuiceConfigData['system_events']['low_charge']['enabled'] = True
+        cli._active_tab.main()
+        listbox = cli.main.original_widget
+        listbox.set_focus(3)
+        row = listbox.body[3]
+        cli.input_filter(['$'], [])
+        self.assertEqual(row.focus_position, 1)
+        cli.input_filter(['0'], [])
+        self.assertEqual(row.focus_position, 0)
+        self.assertEqual(cli.input_filter(['w'], []), ['right'])
+        row.focus_position = 1
+        self.assertEqual(cli.input_filter(['b'], []), ['left'])
+        cli.main_menu()
+        cli.item_chosen('User Scripts')                   # inside a field the same keys move the cursor
+        listbox = cli.main.original_widget
+        listbox.set_focus(4)
+        row = listbox.body[4]
+        edit = next(w for w in cli._walk_widgets(row) if isinstance(w, cli.ScriptEdit))
+        row.focus_position = 2
+        edit.set_edit_text('/usr/local/bin/x.sh'); edit.set_edit_pos(0)
+        self.assertEqual(cli.input_filter(['w'], []), [])
+        self.assertEqual(edit.edit_pos, 1)
+        cli.input_filter(['e', 'x'], [])
+        self.assertEqual(edit.edit_text, '/us/local/bin/x.sh')
+        self.assertEqual(cli.input_filter(['backspace'], []), [])   # normal mode never edits by accident
+        cli.input_filter(['A'], [])
+        self.assertEqual((cli._vim_mode, edit.edit_pos), ('insert', len(edit.edit_text)))
+        cli.input_filter(['esc'], [])
+        self.assertEqual(cli._vim_mode, 'normal')
+        cli.input_filter(['$', 'b', 'b', 'b'], [])
+        self.assertEqual(edit.edit_text[edit.edit_pos:], 'x.sh')
+        cli.VIM_ENABLED = False
+        cli.main_menu()
+
+    def test_notices_expire_and_chrome_is_quiet(self):
+        cli.loop.set_alarm_in.reset_mock()
+        cli._flash('Terminal preference saved.', 'ok')
+        (ttl, clear), _kw = cli.loop.set_alarm_in.call_args
+        self.assertEqual(ttl, 3)
+        clear(cli.loop, None)
+        self.assertEqual(cli._notice[1], '')
+        cli._flash('Could not save', 'error')
+        self.assertEqual(cli.loop.set_alarm_in.call_args.args[0], 10)
+        cli.item_chosen('LEDs')
+        self.assertEqual(cli._notice[1], 'Could not save')   # errors survive a screen change
+        cli._flash('Settings saved.', 'ok')
+        cli._active_tab.configure_led(None, 0)
+        self.assertEqual(cli._notice[1], '')                 # confirmations do not
+        self.assertFalse(any(isinstance(w, urwid.Button) for w in cli._walk_widgets(cli.frame.header)))
+        footer = ''.join(t.get_text()[0] for t in cli._walk_widgets(cli.frame.footer) if isinstance(t, urwid.Text))
+        self.assertNotIn('Tab', footer)
+        self.assertIn('? keys', footer)
+        cli.main_menu()
+
+    def test_opening_a_chooser_and_going_back_is_not_a_draft(self):
+        self.config.GetIoConfiguration.side_effect = lambda pin: ok(
+            {'mode': 'DIGITAL_IN', 'pull': 'NOPULL', 'wakeup': ''} if pin == 2
+            else {'mode': 'PWM_OUT_PUSHPULL', 'pull': 'NOPULL', 'period': '', 'duty_cycle': ''})
+        for choice, path in (('IO', ['IO1', 'Mode: PWM_OUT_PUSHPULL']), ('IO', ['IO2', 'Wakeup: NO_WAKEUP']),
+                             ('LEDs', ['D1', 'Function: Charge status']), ('Buttons', ['SW1'])):
+            cli.item_chosen(choice)
+            for label in path:
+                button = next(b for b in cli._walk_widgets(cli.main.original_widget)
+                              if isinstance(b, cli.MenuButton) and b.label.startswith(label.split(':')[0]))
+                urwid.emit_signal(button, 'click', button)
+                self.assertFalse(cli._dirty, (choice, label, 'entered'))
+            for _ in path:
+                cli.go_back()
+                self.assertFalse(cli._dirty, (choice, 'back'))
+            cli.main_menu()
+        self.assertEqual(cli._drafts, {})
 
     def test_quit_can_be_cancelled_with_drafts_intact(self):
         cli.item_chosen('User Scripts')

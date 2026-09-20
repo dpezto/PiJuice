@@ -39,8 +39,11 @@ from pijuice_service import (  # noqa: E402
     PiJuiceError,
     PiJuiceService,
     alarm_fields,
+    function_description,
+    function_label,
     pack_version,
     readable,
+    user_function_names,
     schedule_values,
     rtc_fields_now,
 )
@@ -400,11 +403,24 @@ class _View(Adw.PreferencesPage):
 
     readable = staticmethod(readable)
 
-    def combo_row(self, group, title, strings, subtitle=None):
-        row = Adw.ComboRow(title=title, model=Gtk.StringList.new([self.readable(x) for x in strings]))
+    def combo_row(self, group, title, strings, subtitle=None, labels=None):
+        row = Adw.ComboRow(title=title, model=Gtk.StringList.new(labels or [self.readable(x) for x in strings]))
         if subtitle:
             row.set_subtitle(subtitle)
         group.add(row)
+        return row
+
+    def function_row(self, group, title, functions, subtitle=None):
+        """Combo over button/event functions with readable labels; the subtitle
+        explains the selected function."""
+        names = user_function_names(self.service.config)
+        row = self.combo_row(group, title, functions, subtitle,
+                             labels=[function_label(f, names) for f in functions])
+        def describe(*_args):
+            fn = self.combo_get(row, functions, 'NO_FUNC')
+            row.set_subtitle((subtitle + ' · ' if subtitle else '') + function_description(fn, self.service.config))
+        row.connect('notify::selected', describe)
+        describe()
         return row
 
     def switch_row(self, group, title, subtitle=None, active=False):
@@ -716,10 +732,12 @@ class ButtonsView(_View):
         for button in self.service.buttons:
             group = self.add_group(button)
             for event in self.service.button_events:
-                row = self.combo_row(group, event, self._functions)
+                row = self.function_row(group, readable(event), self._functions)
                 param = Gtk.Entry(text="0", width_chars=6, valign=_CENTER)
-                param.set_tooltip_text("Delay in milliseconds, in steps of 100 (0–25500)")
-                param.update_property([Gtk.AccessibleProperty.LABEL], [event + " delay in milliseconds"])
+                param.set_tooltip_text("Timing in milliseconds, steps of 100 (0–25500): single-press window, "
+                                       "double-press gap or long-press hold time. Unused for press/release.")
+                param.update_property([Gtk.AccessibleProperty.LABEL], [readable(event) + " timing in milliseconds"])
+                param.set_sensitive(event not in ("PRESS", "RELEASE"))
                 row.add_suffix(param)
                 self._cells[(button, event)] = (row, param)
         self.add_status()
@@ -770,14 +788,17 @@ class UserScriptsView(_View):
     def __init__(self, service):
         super().__init__(service)
         cfg = self.service.config.setdefault("user_functions", {})
+        names = user_function_names(self.service.config)
         self._entries = {}
+        self._names = {}
 
         head = self.add_group(
             "User Scripts",
             description=(
-                "Each USER_FUNCx runs as the pijuice user when a button or system "
-                "event is mapped to it. Use an absolute path (blank = unused); the "
-                "service is reloaded on Apply."
+                "Each slot runs as the pijuice user when a button or system event is "
+                "mapped to it. Use an absolute path (blank = unused). The name is how "
+                "the slot appears in Buttons and System Events; the service is "
+                "reloaded on Apply."
             ),
         )
         self.set_actions(head, self._on_apply)
@@ -786,8 +807,13 @@ class UserScriptsView(_View):
         self._chooser = None  # keep a FileChooserNative alive while it is open
         for i in range(self.COUNT):
             key = "USER_FUNC%d" % (i + 1)
-            row = Adw.EntryRow(title=key)
+            row = Adw.EntryRow(title="Script %d (%s)" % (i + 1, key))
             row.set_text(str(cfg.get(key, "")))
+            name = Gtk.Entry(placeholder_text="Name", text=names.get(key, ""), width_chars=14, valign=_CENTER)
+            name.set_tooltip_text("Optional display name for this slot")
+            name.update_property([Gtk.AccessibleProperty.LABEL], ["Name for script %d" % (i + 1)])
+            row.add_prefix(name)
+            self._names[key] = name
             browse = Gtk.Button(icon_name="document-open-symbolic", valign=_CENTER)
             browse.add_css_class("flat")
             browse.set_tooltip_text("Browse for a script")
@@ -836,7 +862,8 @@ class UserScriptsView(_View):
                 raise ValueError("Choose an existing script using its full path.")
             entry.remove_css_class("error")
             cfg[key] = value
-        self.run_async(lambda: self.service.save_section("user_functions", cfg), self._saved)
+        names = {key: entry.get_text().strip() for key, entry in self._names.items() if entry.get_text().strip()}
+        self.run_async(lambda: self.service.save_sections(user_functions=cfg, user_function_names=names), self._saved)
 
 
 # ── system events view (config JSON) ─────────────────────────────────────────
@@ -874,7 +901,7 @@ class SystemEventsView(_View):
             ev = events_cfg.setdefault(key, {})
             ev.setdefault("enabled", False)
             ev.setdefault("function", "NO_FUNC")
-            row = self.combo_row(group, text, self._functions)
+            row = self.function_row(group, text, self._functions)
             self.combo_set(row, ev["function"], self._functions)
             switch = Gtk.Switch(active=bool(ev["enabled"]), valign=_CENTER)
             switch.update_property([Gtk.AccessibleProperty.LABEL], [text + " enabled"])

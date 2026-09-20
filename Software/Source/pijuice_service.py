@@ -102,14 +102,60 @@ def version_to_str(number):
     return '{}.{}'.format(number >> 4, number & 15)
 
 
+# Button / system-event functions: label and what actually happens. The HARD
+# ones are executed by the firmware itself (they work with the Pi off); the SYS
+# ones are carried out by the pijuice service, so it must be running.
+FUNCTIONS = {
+    'NO_FUNC': ('No action', 'Nothing happens.'),
+    'HARD_FUNC_POWER_ON': ('Power on', 'Firmware applies 5 V to the Pi (turns it on or wakes it).'),
+    'HARD_FUNC_POWER_OFF': ('Hard power off', 'Firmware cuts 5 V to the Pi at once, without a shutdown. Not recommended.'),
+    'HARD_FUNC_RESET': ('Hard reset', 'Firmware cycles 5 V to the Pi, forcing a reboot without a shutdown.'),
+    'SYS_FUNC_HALT': ('Halt', 'The service shuts the OS down; the PiJuice keeps supplying 5 V.'),
+    'SYS_FUNC_HALT_POW_OFF': ('Halt, then power off', 'Turns the system switch off, shuts the OS down, and cuts 5 V to the Pi 60 s later.'),
+    'SYS_FUNC_SYS_OFF_HALT': ('System switch off, then halt', 'Turns the system switch (power to the GPIO header output) off and shuts the OS down; 5 V stays on.'),
+    'SYS_FUNC_REBOOT': ('Reboot', 'The service reboots the OS.'),
+    'USER_EVENT': ('User event', 'Not handled by the service; your own program reads it through the API.'),
+}
+
+
+def user_function_names(config):
+    """``{'USER_FUNC1': 'Backup', ...}`` from the config's ``user_function_names`` section."""
+    return {k: str(v).strip() for k, v in ((config or {}).get('user_function_names') or {}).items() if str(v).strip()}
+
+
+def function_label(name, names=None):
+    """Human label for a button/event function; user scripts use their given name."""
+    if name in FUNCTIONS:
+        return FUNCTIONS[name][0]
+    if name.startswith('USER_FUNC'):
+        return (names or {}).get(name) or 'User script ' + name[9:]
+    return readable(name)
+
+
+def function_description(name, config=None):
+    if name in FUNCTIONS:
+        return FUNCTIONS[name][1]
+    if name.startswith('USER_FUNC'):
+        path = ((config or {}).get('user_functions') or {}).get(name)
+        return 'Runs %s as the pijuice user.' % path if path else 'No script set for this slot (see User Scripts).'
+    return ''
+
+
 def readable(value):
     """Enum -> label shared by both UIs so wording never drifts."""
     aliases = {'PRESENT': 'Connected', 'NOT_PRESENT': 'Not connected', 'NORMAL': 'On battery',
                'CHARGING_FROM_IN': 'Charging via USB', 'CHARGING_FROM_5V_IO': 'Charging via GPIO',
-               'NO_FUNC': 'No action', 'NOT_USED': 'Not used', 'USER_LED': 'Custom colour',
+               'NOT_USED': 'Not used', 'USER_LED': 'Custom colour',
                'CHARGE_STATUS': 'Charge status', 'ON_OFF_STATUS': 'Power status'}
     value = str(value)
-    return aliases.get(value, value.replace('_', ' ').capitalize() if '_' in value else value)
+    if value in aliases:
+        return aliases[value]
+    if value in FUNCTIONS:
+        return FUNCTIONS[value][0]
+    if '_' not in value and not value.isupper():
+        return value
+    text = value.replace('_', ' ').capitalize()
+    return re.sub(r'(?<=[a-z])(?=\d)', ' ', text)  # LONG_PRESS1 -> Long press 1
 
 
 def validate_number(text, kind, lo, hi):
@@ -309,8 +355,13 @@ class PiJuiceService(object):
     # ── config / service ─────────────────────────────────────────────────────
     def save_section(self, section, value):
         """Commit one validated form without publishing a failed or partial draft."""
+        return self.save_sections(**{section: value})
+
+    def save_sections(self, **sections):
+        """Commit several sections in one atomic write and one service reload."""
         config = load_config(self.config_path)
-        config[section] = copy.deepcopy(value)
+        for section, value in sections.items():
+            config[section] = copy.deepcopy(value)
         save_config(config, self.config_path)
         self.config = config
         return self.retry_notify()

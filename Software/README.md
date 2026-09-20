@@ -191,12 +191,60 @@ On narrow windows, use the back arrow to return to the section list.
 
 The screenshots and detailed walkthrough below include earlier interface versions.
 
+### Button and event functions
+
+Both apps show functions by what they do, not by their firmware name. The
+table is the reference; the apps show the same descriptions next to each
+choice.
+
+| Firmware name | Shown as | What happens |
+|---|---|---|
+| `NO_FUNC` | No action | Nothing. |
+| `HARD_FUNC_POWER_ON` | Power on | Firmware applies 5 V to the Pi (turns it on or wakes it). Works with the Pi off. |
+| `HARD_FUNC_POWER_OFF` | Hard power off | Firmware cuts 5 V at once, no shutdown. Not recommended. |
+| `HARD_FUNC_RESET` | Hard reset | Firmware cycles 5 V, forcing a reboot without a shutdown. |
+| `SYS_FUNC_HALT` | Halt | The `pijuice` service shuts the OS down; the PiJuice keeps supplying 5 V. |
+| `SYS_FUNC_HALT_POW_OFF` | Halt, then power off | Service turns the system switch off, shuts down, and the firmware cuts 5 V 60 s later. |
+| `SYS_FUNC_SYS_OFF_HALT` | System switch off, then halt | Service turns the system switch (GPIO header power output) off and shuts down; 5 V stays on. |
+| `SYS_FUNC_REBOOT` | Reboot | Service reboots the OS. |
+| `USER_EVENT` | User event | Not handled by the service; your own program reads it through the API. |
+| `USER_FUNC1`…`15` | the slot's name, or "User script n" | Service runs the script set in **User Scripts** as the `pijuice` user. |
+
+`HARD_*` functions are carried out by the firmware itself, so they work with
+the Pi off; `SYS_*` and user scripts need the `pijuice` service running.
+Button timings (single-press window, double-press gap, long-press hold) are in
+milliseconds in steps of 100; press and release have no timing.
+
+**User Scripts** slots take an optional name. It is stored under
+`user_function_names` in the config and is what Buttons and System Events
+display for that slot in both apps; the firmware still sees `USER_FUNCn`.
+
 ### Terminal interface and battery care
 
-Run `pijuice_cli`. The terminal UI adapts to the window, with colour for focus,
+Run `pijuice_cli`. The window is sized to its content like `raspi-config`
+(up to 78 columns, never taller than the screen), with colour for focus,
 primary actions, warnings and errors. Set `NO_COLOR=1` for a monochrome display.
-Use arrows or Tab to navigate, Enter to select, Esc to go back, F5 to apply,
-F6 to discard a section's draft, F8 to retry a service reload, and F10 to quit.
+
+Keys, the same on every screen (`?` shows this table in the app):
+
+| Action | Keys | With vim keybindings |
+|---|---|---|
+| row up / down | Up / Down | `k` / `j` |
+| first / last row, page | Home / End, PgUp / PgDn | `gg` / `G`, `ctrl-u` / `ctrl-d` |
+| previous / next field in the row | Left / Right (Tab / Shift-Tab continue into the next row) | `h` / `l`, `b` / `w` |
+| first / last field in the row | | `0` / `$` |
+| at the row's start Left goes back; at its end Right opens the focused `›` entry | Left / Right | `h` / `l` |
+| press, toggle, pick | Enter, Space | |
+| back | Esc, Backspace, `q` (`q` at the main menu quits) | |
+| quit | F10, `Q` (asks when drafts exist) | |
+| apply / discard / reload service | F5 / F6 / F8 | |
+| in a text field | Left/Right/Home/End move the cursor, Esc leaves it | NORMAL: `0` `$` `b` `w` `e` move the cursor by word, `x` deletes, `i` `a` `I` `A` enter INSERT, nothing else edits; Esc returns to NORMAL |
+
+Entries that open another screen are drawn as `Name ›`; buttons that act keep
+their `[ ]`. The header shows where you are, e.g. `PiJuice HAT Configuration ›
+Buttons › Button SW1`; going back returns to the row you came from. The footer
+shows a notice for a few seconds (errors longer) and, with vim keybindings on,
+the NORMAL/INSERT mode.
 Returning to the menu keeps drafts; saving a JSON section does not save another
 section's unfinished edits. Numeric errors remain editable and are never silently
 clamped. Custom battery profiles validate representable values before writing.
