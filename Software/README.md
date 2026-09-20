@@ -195,7 +195,7 @@ On narrow windows, use the back arrow to return to the section list.
   `led_white` in the config; the firmware never sees it. Colours can be typed
   as hex (`#rrggbb`) in the CLI or picked from a colour dialog in the GTK app;
   on a truecolor or 256-colour terminal the CLI shows a swatch. **Apply** is
-  available on the LED's own screen (and on a button's screen in Buttons).
+  on the LED's own screen (and on a button's screen in Buttons).
 - **LED functions** (the apps show these next to the choice):
   *Charge status*: the firmware drives the LED from the charge level: above
   50 % green (the G value), 15–50 % red + green, below 15 % red (R); blue (B)
@@ -260,7 +260,7 @@ Keys, the same on every screen (`?` shows this table in the app):
 | back | Esc, Backspace, `q` (`q` at the main menu quits) | |
 | quit | F10, `Q` (asks when drafts exist) | |
 | apply / discard / reload service | F5 / F6 / F8 | |
-| in a text field | Left/Right/Home/End move the cursor, Esc leaves it | NORMAL: `0` `$` `b` `w` `e` move the cursor by word, `x` deletes, `i` `a` `I` `A` enter INSERT, nothing else edits; Esc returns to NORMAL |
+| in a text field | Left/Right/Home/End move the cursor, Esc leaves it | NORMAL: `0` `$` `b` `w` `e` move the cursor by word (nvim-spider words: camelCase and snake_case parts count, punctuation only when it stands alone), `x` deletes, `d`/`c` + motion (`dw`, `de`, `db`, `d0`, `d$`, `dd`, `cw` …) delete or change, `D`/`C` to the end, `i` `a` `I` `A` enter INSERT, nothing else edits; Esc returns to NORMAL |
 
 Entries that open another screen are drawn as `Name ›`; buttons that act keep
 their `[ ]`. The header shows where you are, e.g. `PiJuice HAT Configuration ›

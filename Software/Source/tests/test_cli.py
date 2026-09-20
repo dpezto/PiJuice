@@ -127,8 +127,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(edit.edit_text,'999')
         edit.set_edit_text('100')
         self.assertFalse(cli._errors)
-        cli.go_back()
-        cli.apply_draft()
+        cli.apply_draft()                                  # F5 right here on the LED's screen
         self.assertEqual(self.config.SetLedConfiguration.call_count,2)
 
     def test_led_white_point_hex_and_swatch(self):
@@ -148,8 +147,7 @@ class CliTests(unittest.TestCase):
         self.config.SetLedConfiguration.assert_not_called()
         edits['White point R,G,B'].set_edit_text('60,100,60')
         with patch.object(pijuice_service, 'notify_service', return_value=0):
-            cli.go_back()
-            cli.apply_draft()
+            cli.apply_draft()                                       # F5 on the LED's own screen
         saved = json.loads(Path(cli.PiJuiceConfigDataPath).read_text())
         self.assertEqual(saved['led_white'], {'D1': [255, 255, 255], 'D2': [60, 100, 60]})
         self.assertEqual(self.config.SetLedConfiguration.call_args.args[1]['parameter'], {'r': 60, 'g': 25, 'b': 0})
@@ -231,6 +229,7 @@ class CliTests(unittest.TestCase):
 
     def test_failed_led_write_never_reports_success(self):
         cli.item_chosen('LEDs')
+        cli._active_tab.configure_led(None, 0)
         self.config.SetLedConfiguration.return_value={'error':'WRITE_FAILED'}
         self.click('Apply settings')
         self.assertEqual(cli._notice[0],'error')
@@ -337,10 +336,11 @@ class CliTests(unittest.TestCase):
         cli.input_filter(['left'], [])
         listbox = cli.main.original_widget.original_widget   # LED list is padded
         for i, row in enumerate(listbox.body):
-            if any(isinstance(b, urwid.Button) and b.label == 'Apply settings' for b in cli._walk_widgets(row)):
+            if any(isinstance(b, urwid.Button) and b.label == 'Refresh' for b in cli._walk_widgets(row)):
                 listbox.set_focus(i)
+        reads = self.config.GetLedConfiguration.call_count
         cli.input_filter(['right'], [])                   # Right on an action button does nothing
-        self.assertEqual(self.config.SetLedConfiguration.call_count, 0)
+        self.assertEqual(self.config.GetLedConfiguration.call_count, reads)
         cli.input_filter(['left'], [])                    # Left closes: back to the menu
         self.assertIsNone(cli._active_tab)
         cli.item_chosen('System Events')                  # rows with fields: Left/Right/Tab walk them
@@ -413,8 +413,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual((cli._vim_mode, edit.edit_pos), ('insert', len(edit.edit_text)))
         cli.input_filter(['esc'], [])
         self.assertEqual(cli._vim_mode, 'normal')
-        cli.input_filter(['$', 'b', 'b', 'b'], [])
-        self.assertEqual(edit.edit_text[edit.edit_pos:], 'x.sh')
+        cli.input_filter(['$', 'b', 'b', 'b'], [])         # words are nvim-spider words: bin, x, sh (no '/' or '.')
+        self.assertEqual(edit.edit_text[edit.edit_pos:], 'bin/x.sh')
+        cli.input_filter(['d', 'w'], [])                   # dw: to the start of the next word
+        self.assertEqual(edit.edit_text, '/us/local/x.sh')
+        cli.input_filter(['0', 'd', 'e'], [])              # de from the leading '/': through the end of "us"
+        self.assertEqual(edit.edit_text, '/local/x.sh')
+        cli.input_filter(['$', 'd', 'b'], [])              # db at the end: the last word only
+        self.assertEqual(edit.edit_text, '/local/x.')
+        cli.input_filter(['0', 'D'], [])                   # D: to the end
+        self.assertEqual(edit.edit_text, '')
+        edit.set_edit_text('one two'); edit.set_edit_pos(4)
+        cli.input_filter(['c', 'e'], [])                   # ce: change the word, INSERT
+        self.assertEqual((edit.edit_text, cli._vim_mode), ('one ', 'insert'))
+        cli.input_filter(['x', 'esc'], [])
+        edit.set_edit_text('fooBarBaz'); edit.set_edit_pos(0)
+        cli.input_filter(['c', 'w'], [])                   # cw = ce on a camelCase part
+        self.assertEqual((edit.edit_text, cli._vim_mode), ('BarBaz', 'insert'))
+        cli.input_filter(['esc', 'c', 'c'], [])            # cc: whole field
+        self.assertEqual((edit.edit_text, cli._vim_mode), ('', 'insert'))
+        cli.input_filter(['esc'], [])
         cli.VIM_ENABLED = False
         cli.main_menu()
 

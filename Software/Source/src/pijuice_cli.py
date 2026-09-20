@@ -747,7 +747,6 @@ class LEDTab(object):
         elements.extend(
             [
                 urwid.Divider(),
-                attrmap(ActionButton("Apply settings", on_press=self._apply_settings)),
                 attrmap(ActionButton("Refresh", on_press=self._refresh_settings)),
                 attrmap(ActionButton("Back", on_press=main_menu)),
             ]
@@ -3177,7 +3176,7 @@ loop = None
 
 VIM_ENABLED = bool(loadPiJuiceConfig().get("cli_settings", {}).get("vim_keys", False))
 _vim_mode = "normal"  # 'normal' | 'insert' (only meaningful when VIM_ENABLED)
-_vim_pending_g = False
+_vim_pending = None  # 'g' after g, or an operator ('d'/'c') waiting for its motion
 _VIM_MOTIONS = {
     "j": "down",
     "k": "up",
@@ -3219,7 +3218,7 @@ KEYS_VIM = [
     ("gg / G", "first / last row"),
     ("ctrl-u / ctrl-d, ctrl-b / ctrl-f", "page up / down"),
     ("i, a, I, A", "edit the focused field: INSERT at the cursor / after it / at the start / at the end"),
-    ("in a field, NORMAL", "0 ^ $ b w e move the cursor by word, x deletes a character, other keys do nothing"),
+    ("in a field, NORMAL", "0 ^ $ b w e move the cursor by word (nvim-spider words: camelCase/snake_case parts, punctuation skipped unless alone); x deletes a character; d or c + motion, dd/cc, D/C delete or change (c enters INSERT)"),
     ("Esc", "INSERT back to NORMAL"),
 ]
 
@@ -3430,10 +3429,14 @@ def _restore_view(widget, back, loc):
     _render_header()
 
 
-def vim_translate(keys, mode, editable, pending_g):
-    """Pure key mapping (no urwid). Returns (out_keys, mode, pending_g, want_insert).
-    h/l/j/k -> left/right/down/up so focus moves (incl. across columns); back is
-    triggered separately when 'left' goes unhandled (focus at the left edge)."""
+_OPERATOR_MOTIONS = ("0", "^", "$", "w", "e", "b")
+
+
+def vim_translate(keys, mode, editable, pending):
+    """Pure key mapping (no urwid). Returns (out_keys, mode, pending, want_insert).
+    *pending* is a prefix key waiting for its second half: 'g' (gg) or an
+    operator 'd'/'c' waiting for a motion; operators emit '__op:d:w__' style
+    sentinels that input_filter applies to the focused text field."""
     out, want_insert = [], False
     for key in keys:
         if mode == "insert":
@@ -3443,14 +3446,25 @@ def vim_translate(keys, mode, editable, pending_g):
                 out.append(key)
             continue
         # normal mode
-        if key == "g":
-            if pending_g:
-                out.append("home")
-                pending_g = False
-            else:
-                pending_g = True
+        if pending in ("d", "c"):
+            if key == pending or key in _OPERATOR_MOTIONS:
+                out.append("__op:%s:%s__" % (pending, key))
+            pending = None
             continue
-        pending_g = False
+        if key == "g":
+            if pending == "g":
+                out.append("home")
+                pending = None
+            else:
+                pending = "g"
+            continue
+        pending = None
+        if key in ("d", "c") and editable:
+            pending = key
+            continue
+        if key in ("D", "C") and editable:
+            out.append("__op:%s:$__" % key.lower())
+            continue
         if key in ("i", "a") and editable:
             want_insert = True
             mode = "insert"
@@ -3470,12 +3484,48 @@ def vim_translate(keys, mode, editable, pending_g):
             pass  # swallow: normal-mode keys must not edit the field
         else:
             out.append(key)
-    return out, mode, pending_g, want_insert
+    return out, mode, pending, want_insert
+
+
+def _apply_operator(edit, op, motion):
+    """vim d/c + motion on a text field: dd/cc whole field, d0/d$/D, dw/de/db, cw = ce."""
+    text, pos = edit.edit_text, edit.edit_pos
+    if motion in ("d", "c"):
+        start, end = 0, len(text)
+    elif motion in ("0", "^"):
+        start, end = 0, pos
+    elif motion == "$":
+        start, end = pos, len(text)
+    elif motion == "b":
+        start, end = _word_motion(text, pos, "b"), pos
+    elif motion == "e" or (motion == "w" and op == "c"):
+        start, end = pos, min(len(text), _word_motion(text, pos, "e") + 1)
+    else:  # dw
+        start, end = pos, _word_motion(text, pos, "w")
+    edit.set_edit_text(text[:start] + text[end:])
+    edit.set_edit_pos(start)
+    return op == "c"
+
+
+def _spider_words(text):
+    """Word spans the way nvim-spider sees them: camelCase and snake_case parts are
+    words of their own, and punctuation only counts when it stands alone
+    (``foo.bar`` -> foo, bar; ``a == b`` -> a, ==, b)."""
+    words = []
+    for run in re.finditer(r"\w+", text):
+        for sub in re.finditer(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", run.group()):
+            words.append((run.start() + sub.start(), run.start() + sub.end()))
+    for run in re.finditer(r"[^\w\s]+", text):
+        before = run.start() == 0 or text[run.start() - 1].isspace()
+        after = run.end() == len(text) or text[run.end()].isspace()
+        if before and after:
+            words.append((run.start(), run.end()))
+    return sorted(words)
 
 
 def _word_motion(text, pos, op):
-    """Cursor position after a vim word motion on *text*: w, b or e."""
-    words = [(m.start(), m.end()) for m in re.finditer(r"\w+|[^\w\s]+", text)]
+    """Cursor position after a word motion on *text*: w, b or e (nvim-spider words)."""
+    words = _spider_words(text)
     if op == "w":
         return next((start for start, _end in words if start > pos), len(text))
     if op == "e":
@@ -3488,7 +3538,7 @@ def input_filter(keys, raw):
     item, Left/Esc/Backspace/q (vim h) close it and go back; Enter presses,
     toggles or picks. Tab moves across a row, then down. Keys that would type
     into or move within a focused text field are left alone."""
-    global _vim_mode, _vim_pending_g
+    global _vim_mode, _vim_pending
     editable = _focus_is_editable(frame)
     out = []
     for key in keys:
@@ -3509,13 +3559,20 @@ def input_filter(keys, raw):
                 _vim_mode = "normal"
                 _render_header()
                 continue
-            mapped, _vim_mode, _vim_pending_g, want_insert = vim_translate(
-                [key], _vim_mode, editable, _vim_pending_g)
+            mapped, _vim_mode, _vim_pending, want_insert = vim_translate(
+                [key], _vim_mode, editable, _vim_pending)
             if want_insert:
                 _render_header()
         else:
             mapped = [BACK if (key in ("q", "backspace") and not editable) else key]
         for mapped_key in mapped:
+            if mapped_key.startswith("__op:"):
+                if editable:
+                    _op, motion = mapped_key[5:-2].split(":")
+                    if _apply_operator(_focus_leaf(frame), _op, motion):
+                        _vim_mode = "insert"
+                        _render_header()
+                continue
             if mapped_key in (ROW_HOME, ROW_END, FIELD_PREV, FIELD_NEXT, WORD_END, EDIT_X, INSERT_START, INSERT_END):
                 out.extend(_resolve_vim(mapped_key, editable))
                 continue
@@ -3624,29 +3681,34 @@ def _tab_key(forward):
 
 
 def _selftest():
-    assert vim_translate(["j"], "normal", False, False)[0] == ["down"]
-    assert vim_translate(["k"], "normal", False, False)[0] == ["up"]
-    assert vim_translate(["h"], "normal", False, False)[0] == [HLEFT]
-    assert vim_translate(["q"], "normal", True, False)[0] == [BACK]
-    assert vim_translate(["l"], "normal", False, False)[0] == [HRIGHT]
-    assert vim_translate(["0", "$", "w", "b"], "normal", False, False)[0] == [ROW_HOME, ROW_END, FIELD_NEXT, FIELD_PREV]
-    assert vim_translate(["x", "A"], "normal", False, False)[0] == []  # editing keys need a field
-    assert vim_translate(["x", "backspace"], "normal", True, False)[0] == [EDIT_X]
+    assert vim_translate(["j"], "normal", False, None)[0] == ["down"]
+    assert vim_translate(["k"], "normal", False, None)[0] == ["up"]
+    assert vim_translate(["h"], "normal", False, None)[0] == [HLEFT]
+    assert vim_translate(["q"], "normal", True, None)[0] == [BACK]
+    assert vim_translate(["l"], "normal", False, None)[0] == [HRIGHT]
+    assert vim_translate(["0", "$", "w", "b"], "normal", False, None)[0] == [ROW_HOME, ROW_END, FIELD_NEXT, FIELD_PREV]
+    assert vim_translate(["x", "A"], "normal", False, None)[0] == []  # editing keys need a field
+    assert vim_translate(["x", "backspace"], "normal", True, None)[0] == [EDIT_X]
     assert _word_motion("/usr/local/bin/x.sh", 0, "w") == 1 and _word_motion("ab cd", 3, "b") == 0
     assert _word_motion("ab cd", 0, "e") == 1 and _word_motion("ab cd", 4, "w") == 5
+    assert [t[0] for t in _spider_words("fooBar_baz HTTPServer a == b.c")] == [0, 3, 7, 11, 15, 22, 24, 27, 29]
     assert _hex_to_rgb("#3C643c") == [60, 100, 60] and _rgb_to_hex([60, 100, 60]) == "#3c643c"
     assert _hex_to_rgb("3c643") is None
     assert _is_menu_button(MenuButton("Buttons")) and not _is_menu_button(ActionButton("Apply settings"))
-    out, m, p, ins = vim_translate(["g"], "normal", False, False)
-    assert p is True and out == []
-    assert vim_translate(["g"], "normal", False, True)[0] == ["home"]
-    out, m, p, ins = vim_translate(["i"], "normal", True, False)
+    out, m, p, ins = vim_translate(["g"], "normal", False, None)
+    assert p == "g" and out == []
+    assert vim_translate(["g"], "normal", False, "g")[0] == ["home"]
+    assert vim_translate(["d", "w"], "normal", True, None)[0] == ["__op:d:w__"]
+    assert vim_translate(["c", "c"], "normal", True, None)[0] == ["__op:c:c__"]
+    assert vim_translate(["D"], "normal", True, None)[0] == ["__op:d:$__"]
+    assert not any(k.startswith("__op") for k in vim_translate(["d", "w"], "normal", False, None)[0])  # operators need a field
+    out, m, p, ins = vim_translate(["i"], "normal", True, None)
     assert ins is True and m == "insert" and out == []
-    assert vim_translate(["y"], "normal", True, False)[0] == []  # swallowed: no typing in normal mode
-    assert vim_translate(["x"], "insert", True, False)[0] == ["x"]  # typed
-    out, m, p, ins = vim_translate(["esc"], "insert", True, False)
+    assert vim_translate(["y"], "normal", True, None)[0] == []  # swallowed: no typing in normal mode
+    assert vim_translate(["x"], "insert", True, None)[0] == ["x"]  # typed
+    out, m, p, ins = vim_translate(["esc"], "insert", True, None)
     assert m == "normal" and out == []
-    assert vim_translate(["enter"], "normal", False, False)[0] == ["enter"]  # select
+    assert vim_translate(["enter"], "normal", False, None)[0] == ["enter"]  # select
     # _hoist_back removes the Back/Cancel row and returns its button.
     bb = ActionButton("Back")
     lb = CyclingListBox(urwid.SimpleFocusListWalker([urwid.Text("t"), urwid.Padding(attrmap(bb), width=8)]))

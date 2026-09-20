@@ -98,8 +98,11 @@ pijuice-base; urgency=low
       detection did not work in the real terminal)
     - Vim keybindings: `0`/`^`/`$` first/last field of a row, `b`/`w`/`e`
       previous/next field, `ctrl-u`/`ctrl-d`; inside a field in NORMAL mode the
-      same keys move the cursor by word, `x` deletes, `I`/`A` enter INSERT at
-      the start/end, and no other key edits the field
+      same keys move the cursor by nvim-spider word (camelCase/snake_case
+      parts, punctuation skipped unless alone), `x` deletes, `d`/`c` + motion
+      (`dw`, `de`, `db`, `d0`, `d$`, `dd`, `cw`, …) and `D`/`C` delete or
+      change, `I`/`A` enter INSERT at the start/end, and no other key edits
+      the field
     - Footer notices clear themselves after a few seconds (errors after ten);
       the footer shows only the notice, `? keys` and the vim mode; the "← back"
       header button and the key hint line are gone
