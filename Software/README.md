@@ -45,7 +45,16 @@ To remove PiJuice you'll need to run:
 #### Build DEB-packages manually
 `./pckg-pijuice.sh`
 
-*Note: You will need stdeb3 and debhelper in order to be able to build.*
+Needs only `dpkg-deb`; the kernel module is built by DKMS on the target at
+install time.
+
+#### Supported systems
+
+Raspberry Pi OS Bookworm and Trixie, 64-bit and 32-bit (Pi Zero W included:
+the DKMS build takes a few minutes there). Python 3.11+, GTK 4 and libadwaita
+1.2+ are required, so Buster and Bullseye are not supported since 1.9. The
+Fedora, Ubuntu and Kali notes under `OS Support/` predate this packaging and
+are untested.
 
 #### OSMC/Kodi Installations
 
