@@ -83,6 +83,9 @@ pijuice-base; urgency=low
       once battery history has a qualifying discharge); writes `present = 0` on
       stop
 
+* pijuice_power 1.3: `cycle_count`, `health` and `time_to_empty_now`, fed by
+  the daemon from battery history and the HAT fault flags
+
 * pijuice_power 1.2:
     - `charge_full_design` is its own value (it aliased `charge_full`)
     - No phantom battery before the daemon writes (`present = 0`, `capacity = 0`)

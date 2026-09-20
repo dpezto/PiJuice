@@ -25,6 +25,9 @@ static int current_now;		/* microamps */
 static int temp;		/* tenths of a degree Celsius */
 static int charge_full;		/* microamp-hours, learned or profile capacity */
 static int charge_full_design;	/* microamp-hours, from the HAT battery profile */
+static int cycle_count;		/* equivalent full cycles from battery history */
+static int health = POWER_SUPPLY_HEALTH_UNKNOWN;
+static int time_to_empty;	/* seconds; 0 = unknown */
 
 static enum power_supply_property pijuice_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
@@ -38,6 +41,9 @@ static enum power_supply_property pijuice_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
+	POWER_SUPPLY_PROP_CYCLE_COUNT,
+	POWER_SUPPLY_PROP_HEALTH,
+	POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW,
 };
 
 static int pijuice_get_property(struct power_supply *psy,
@@ -75,6 +81,15 @@ static int pijuice_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		/* Derived, so it can never disagree with capacity. */
 		val->intval = (int)((long long)charge_full * capacity / 100);
+		break;
+	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+		val->intval = cycle_count;
+		break;
+	case POWER_SUPPLY_PROP_HEALTH:
+		val->intval = health;
+		break;
+	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW:
+		val->intval = time_to_empty;
 		break;
 	default:
 		return -EINVAL;
@@ -118,6 +133,15 @@ static int pijuice_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		charge_full_design = val->intval;
 		break;
+	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+		cycle_count = val->intval;
+		break;
+	case POWER_SUPPLY_PROP_HEALTH:
+		health = val->intval;
+		break;
+	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW:
+		time_to_empty = val->intval;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -137,6 +161,9 @@ static int pijuice_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_TEMP:
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+	case POWER_SUPPLY_PROP_HEALTH:
+	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW:
 		return 1;
 	default:
 		return 0;
@@ -186,4 +213,4 @@ module_exit(pijuice_power_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PiJuice virtual power_supply, fed by the pijuice_sys daemon");
 MODULE_AUTHOR("PiJuice");
-MODULE_VERSION("1.2");
+MODULE_VERSION("1.3");

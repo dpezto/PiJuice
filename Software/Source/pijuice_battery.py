@@ -222,6 +222,11 @@ class BatteryHistory:
         self.floor = None
         self.last_save = None
 
+    def load_ma(self):
+        """Last battery-side load (mA) while discharging on valid readings, else None."""
+        prev = self.previous
+        return prev['effective_ma'] if prev and prev['discharging'] else None
+
     def capacity_mah(self):
         """Median learned full capacity, or None until a session qualifies."""
         samples = (self.state or {}).get('samples') or []

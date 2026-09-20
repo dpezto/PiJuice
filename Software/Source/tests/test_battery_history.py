@@ -131,8 +131,12 @@ class HistoryTests(unittest.TestCase):
 
     def test_learned_capacity_feeds_power_supply_only_after_a_session(self):
         self.assertIsNone(self.history.capacity_mah())
+        self.assertIsNone(self.history.load_ma())
         self.sample(80)
         self.assertIsNone(self.history.capacity_mah())
+        self.assertAlmostEqual(self.history.load_ma(), 5000 * 540 / 4000 / 0.9)  # GPIO load -> battery side
+        self.sample(80, POWERED)
+        self.assertIsNone(self.history.load_ma())
         self.history.state['samples'] = [{'capacity_mah': 1500}, {'capacity_mah': 1700}, {'capacity_mah': 1600}]
         self.assertEqual(self.history.capacity_mah(), 1600)
 

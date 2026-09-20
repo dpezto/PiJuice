@@ -23,6 +23,35 @@ class SysTests(unittest.TestCase):
         self.pj.rtcAlarm.SetAlarm.return_value = self.pj.rtcAlarm.SetWakeupEnabled.return_value = ok()
         self.pj.power.SetWakeUpOnCharge.return_value = ok()
 
+    def test_power_supply_feed_writes_health_cycles_and_time_to_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daemon.POWER_SUPPLY_DIR = tmp
+            daemon._batCapacityMah = 2000
+            daemon._loadEmaMa = None
+            history = Mock()
+            history.state = {'cycles': 3.7}
+            history.capacity_mah.return_value = 1800
+            history.load_ma.return_value = 450.0
+            daemon.batteryHistory = history
+            self.pj.status.GetChargeLevel.return_value = ok(50)
+            self.pj.status.GetBatteryVoltage.return_value = ok(3900)
+            self.pj.status.GetBatteryCurrent.return_value = ok(-400)
+            self.pj.status.GetBatteryTemperature.return_value = ok(24)
+            self.pj.status.GetFaultStatus.return_value = ok({'charging_temperature_fault': 'SUSPEND'})
+            read = lambda attr: Path(tmp, attr).read_text()
+            daemon._UpdatePowerSupply({'battery': 'NORMAL', 'powerInput': 'NOT_PRESENT', 'powerInput5vIo': 'NOT_PRESENT'})
+            self.assertEqual(read('cycle_count'), '3')
+            self.assertEqual(read('health'), 'Good')
+            self.assertEqual(read('charge_full'), '1800000')
+            self.assertEqual(read('time_to_empty_now'), '7200')  # 900 mAh left at 450 mA
+            self.pj.status.GetFaultStatus.assert_not_called()
+            daemon._UpdatePowerSupply({'battery': 'NORMAL', 'isFault': True, 'powerInput': 'PRESENT'})
+            self.assertEqual(read('health'), 'Cold')
+            history.load_ma.return_value = None
+            daemon._UpdatePowerSupply({'battery': 'NOT_PRESENT'})
+            self.assertEqual(read('time_to_empty_now'), '0')
+            self.assertEqual(read('health'), 'No battery')
+
     def test_restore_rearms_only_when_device_lost_it(self):
         daemon.configData['wakeup_alarm'] = {'enabled': True, 'alarm': {'hour': 3, 'minute': 0}}
         self.pj.rtcAlarm.GetControlStatus.return_value = ok({'alarm_wakeup_enabled': True})

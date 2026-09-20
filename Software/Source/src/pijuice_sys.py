@@ -372,6 +372,38 @@ def reload_settings(signum=None, frame=None):
 _psWriteErrors = set()   # (attr, errno) already reported, so the journal isn't spammed
 _psMissingReported = False
 _batCapacityMah = None   # battery profile capacity, read once from the HAT
+_loadEmaMa = None        # smoothed discharge load for time_to_empty_now
+
+
+def _TimeToEmpty(charge, capacity_mah):
+    """Seconds left at the smoothed GPIO load; 0 when not discharging or unknown."""
+    global _loadEmaMa
+    load = batteryHistory.load_ma() if batteryHistory is not None else None
+    if load is None or not isinstance(charge, int) or not capacity_mah:
+        _loadEmaMa = None
+        return 0
+    # ponytail: EMA over 5 s samples; a real coulomb counter would replace this.
+    _loadEmaMa = load if _loadEmaMa is None else 0.7 * _loadEmaMa + 0.3 * load
+    seconds = charge / 100 * capacity_mah / _loadEmaMa * 3600
+    return int(seconds // 60 * 60)  # minute steps keep uevents quiet
+
+
+def _Health(status, temperature):
+    """Kernel health text from the HAT fault flags (one extra read only when flagged)."""
+    if status.get('battery') == 'NOT_PRESENT':
+        return 'No battery'
+    if not status.get('isFault'):
+        return 'Good'
+    faults = pijuice.status.GetFaultStatus()
+    if faults.get('error') != 'NO_ERROR':
+        return 'Unknown'
+    faults = faults['data']
+    if faults.get('battery_profile_invalid'):
+        return 'Unspecified failure'
+    thermal = faults.get('charging_temperature_fault', 'NORMAL')
+    if thermal == 'SUSPEND':
+        return 'Overheat' if isinstance(temperature, int) and temperature > 30 else 'Cold'
+    return {'WARM': 'Warm', 'COOL': 'Cool'}.get(thermal, 'Good')
 
 
 def _write_power_supply(attr, val):
@@ -401,14 +433,18 @@ def _UpdatePowerSupply(status):
         prof = pijuice.config.GetBatteryProfile()
         if prof.get('error') == 'NO_ERROR' and isinstance(prof['data'].get('capacity'), int):
             _batCapacityMah = prof['data']['capacity']
+    learned = batteryHistory.capacity_mah() if batteryHistory is not None else None
+    full_mah = int(learned or _batCapacityMah or 0)
     if _batCapacityMah:
         # Written every poll (no I2C) so a module reload picks it up again; the
         # module only raises a uevent when a value actually changes.
-        learned = batteryHistory.capacity_mah() if batteryHistory is not None else None
         _write_power_supply('charge_full_design', _batCapacityMah * 1000)          # mAh -> uAh
-        _write_power_supply('charge_full', int(learned or _batCapacityMah) * 1000)
+        _write_power_supply('charge_full', full_mah * 1000)
+    if batteryHistory is not None and batteryHistory.state:
+        _write_power_supply('cycle_count', int(batteryHistory.state.get('cycles', 0)))
     bat = status.get('battery')
     charge = pijuice.status.GetChargeLevel().get('data')
+    _write_power_supply('time_to_empty_now', _TimeToEmpty(charge, full_mah))
     if bat == 'NOT_PRESENT':
         _write_power_supply('present', 0)
         _write_power_supply('status', 'Unknown')
@@ -434,6 +470,7 @@ def _UpdatePowerSupply(status):
     t = pijuice.status.GetBatteryTemperature().get('data')  # degC -> 0.1 degC
     if isinstance(t, int):
         _write_power_supply('temp', t * 10)
+    _write_power_supply('health', _Health(status, t))
 
 
 def main():
