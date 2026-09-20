@@ -1,5 +1,6 @@
-pijuice ALL=(ALL) NOPASSWD: /sbin/modprobe *, /sbin/halt, /sbin/reboot, /bin/kill -SIGHUP *, /bin/systemctl list-jobs
-# Desktop users in the pijuice group tell the daemon to reload its config.
-%pijuice ALL=(root) NOPASSWD: /bin/kill -SIGHUP *
+pijuice ALL=(ALL) NOPASSWD: /sbin/modprobe *, /sbin/halt, /sbin/reboot, /bin/kill -SIGHUP *, /bin/kill -SIGUSR1 *, /bin/kill -SIGUSR2 *, /bin/systemctl list-jobs
+# Desktop users in the pijuice group tell the daemon to reload its config (HUP)
+# and to pause/resume polling around a firmware flash (USR1/USR2).
+%pijuice ALL=(root) NOPASSWD: /bin/kill -SIGHUP *, /bin/kill -SIGUSR1 *, /bin/kill -SIGUSR2 *
 pijuice ALL=(%pijuice) NOPASSWD: ALL
 

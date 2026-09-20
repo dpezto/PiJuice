@@ -52,6 +52,13 @@ class SysTests(unittest.TestCase):
             self.assertEqual(read('time_to_empty_now'), '0')
             self.assertEqual(read('health'), 'No battery')
 
+    def test_pause_signal_holds_polling_for_two_minutes(self):
+        import signal, time
+        daemon._PausePolling(signal.SIGUSR1, None)
+        self.assertGreater(daemon._pausedUntil, time.monotonic() + 100)
+        daemon._PausePolling(signal.SIGUSR2, None)
+        self.assertEqual(daemon._pausedUntil, 0.0)
+
     def test_restore_rearms_only_when_device_lost_it(self):
         daemon.configData['wakeup_alarm'] = {'enabled': True, 'alarm': {'hour': 3, 'minute': 0}}
         self.pj.rtcAlarm.GetControlStatus.return_value = ok({'alarm_wakeup_enabled': True})

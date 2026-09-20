@@ -1503,9 +1503,7 @@ class FirmwareView(_View):
             if (status.get("powerInput") != "PRESENT" and status.get("powerInput5vIo") != "PRESENT"
                     and self.service.get_charge_level() < 20):
                 raise PiJuiceError("Connect external power or charge to at least 20%.")
-            rc = self.service.flash_firmware(self._bin_file)
-            if rc:
-                raise PiJuiceError("Firmware update failed (code %s)" % rc)
+            self.service.flash_firmware(self._bin_file)  # raises with the reason on failure
             for _ in range(60):  # ponytail: bounded 30 s; the HAT reboots in a few
                 time.sleep(0.5)
                 if self.service.connect():

@@ -30,7 +30,6 @@ from pijuice_service import (
     PiJuiceError,
     PiJuiceService,
     alarm_fields,
-    firmware_error,
     load_config as _service_load_config,
     readable,
     rtc_fields_now,
@@ -362,7 +361,8 @@ class FirmwareTab(object):
             waittext.set_text("Updating firmware, Wait " + spinner[i])
             loop.draw_screen()
         try:
-            reason = firmware_error(future.result())
+            future.result()
+            reason = None
         except PiJuiceError as exc:
             reason = str(exc)
         if reason:
@@ -3268,7 +3268,6 @@ def _selftest():
     )
     assert isinstance(_hoist_back(lb), urwid.Button) and len(lb.body) == 1
     assert _hoist_back(urwid.Filler(urwid.Pile([urwid.Text("x")]))) is None
-    assert firmware_error(0) is None and firmware_error(255).startswith("I2C_BUS_ACCESS_ERROR")
     print("selftest OK")
 
 

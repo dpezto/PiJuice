@@ -28,6 +28,7 @@ from pijuice_battery import battery_report, charge_policy
 import copy
 import json
 import os
+import re
 import subprocess
 import tempfile
 import uuid
@@ -62,13 +63,30 @@ FIRMWARE_HINTS = {
 }
 
 
+FIRMWARE_FILE_RE = re.compile(r'PiJuice-V(\d+)\.(\d+)_(\d+_\d+_\d+)\.elf\.binary$')
+# Every released image (V1.0 .. V1.6) is 60-90 KB; the MCU flash is 128 KB.
+FIRMWARE_SIZE_RANGE = (32 * 1024, 128 * 1024)
+
+
 def firmware_error(returncode):
-    """Human-readable reason for a non-zero ``pijuice_boot`` exit, or ``None``."""
+    """Human-readable reason for a non-zero ``pijuiceboot`` exit, or ``None``."""
     if returncode == 0:
         return None
     index = 256 - returncode
     reason = FIRMWARE_UPDATE_ERRORS[index] if 0 < index < len(FIRMWARE_UPDATE_ERRORS) else 'UNKNOWN'
     return (reason + '. ' + FIRMWARE_HINTS.get(reason, '')).strip()
+
+
+def check_firmware_file(path):
+    """Refuse an image the flasher would happily brick the HAT with."""
+    if not FIRMWARE_FILE_RE.search(os.path.basename(path)):
+        raise PiJuiceError('Not a PiJuice firmware file name (PiJuice-Vx.y_YYYY_MM_DD.elf.binary)', 'firmware')
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise PiJuiceError(str(exc), 'firmware')
+    if not FIRMWARE_SIZE_RANGE[0] <= size <= FIRMWARE_SIZE_RANGE[1]:
+        raise PiJuiceError('Image is %d bytes; a PiJuice image is 32-128 KB. Download it again.' % size, 'firmware')
 
 
 def pack_version(text):
@@ -190,12 +208,9 @@ def save_config(data, path=CONFIG_PATH_DEFAULT):
             os.unlink(temporary)
 
 
-def notify_service(pid_file=PID_FILE_DEFAULT):
-    """Tell the running ``pijuice`` service to reload its config (SIGHUP).
-
-    Returns 0 on success, non-zero otherwise. UI-agnostic: callers decide how to
-    present a failure (CLI prints, GUI shows a dialog).
-    """
+def signal_service(sig, pid_file=PID_FILE_DEFAULT):
+    """Send *sig* (``'SIGHUP'`` reload, ``'SIGUSR1'`` pause polling, ``'SIGUSR2'``
+    resume) to the running ``pijuice`` daemon. Returns 0 on success."""
     try:
         with open(pid_file, 'r') as fh:
             pid = int(fh.read())
@@ -203,8 +218,13 @@ def notify_service(pid_file=PID_FILE_DEFAULT):
         return -1
     # No shell: pid is validated as int, args passed directly to sudo/kill.
     with open(os.devnull, 'wb') as devnull:
-        return subprocess.call(['sudo', '-n', 'kill', '-SIGHUP', str(pid)],
+        return subprocess.call(['sudo', '-n', 'kill', '-' + sig, str(pid)],
                                stdout=devnull, stderr=devnull, timeout=10)
+
+
+def notify_service(pid_file=PID_FILE_DEFAULT):
+    """Tell the running ``pijuice`` service to reload its config (SIGHUP)."""
+    return signal_service('SIGHUP', pid_file)
 
 
 def _unwrap(result, context=''):
@@ -574,14 +594,28 @@ class PiJuiceService(object):
 
     # ── firmware domain ──────────────────────────────────────────────────────
     def flash_firmware(self, bin_file):
-        """Run ``pijuiceboot <addr> <bin_file>``; return its exit code (0 = ok).
+        """Run ``pijuiceboot`` on *bin_file*; raise :class:`PiJuiceError` with the
+        reason and the flasher's last lines on failure, return 0 on success.
 
-        Runs on the I2C worker so no other transfer touches the bus mid-flash.
+        Runs on the I2C worker so no other transfer touches the bus mid-flash;
+        the daemon is asked to pause its polling meanwhile (SIGUSR1/SIGUSR2).
         ponytail: no live page-progress parsing -- a blocking flash with a final
-        result is enough for a rare, manual operation; add a callback-fed
-        progress channel only if the UI needs a bar.
+        result is enough for a rare, manual operation.
         """
+        check_firmware_file(bin_file)
         addr = self._require().config.interface.GetAddress()
         if not addr:
             raise PiJuiceError('NO_ADDRESS', 'firmware')
-        return subprocess.call(['pijuiceboot', format(addr, 'x'), bin_file])
+        bus, _addr = self._resolve_bus_addr()
+        signal_service('SIGUSR1', self.pid_file)
+        try:
+            run = subprocess.run(['pijuiceboot', format(addr, 'x'), bin_file, str(bus)],
+                                 capture_output=True, text=True, timeout=600)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PiJuiceError(str(exc), 'pijuiceboot')
+        finally:
+            signal_service('SIGUSR2', self.pid_file)
+        if run.returncode:
+            tail = ' | '.join(line for line in run.stdout.splitlines()[-3:] if line.strip())
+            raise PiJuiceError('%s (%s)' % (firmware_error(run.returncode), tail or 'no output'), 'firmware')
+        return 0

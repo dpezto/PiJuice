@@ -560,20 +560,33 @@ The GUI and CLI take the highest version from that filename, compare it with
 the version the HAT reports, and offer **Update firmware** only when the file
 is newer. To flash a different image, drop it in that directory.
 
-How an update works: the app refuses to start on battery below 20 %, then runs
-`pijuiceboot <i2c address> <file>` on the service worker so nothing else uses
-the bus. `pijuiceboot` (`Firmware/pijuiceboot.c`, prebuilt in
-`Software/Source/bin/`) asks the running firmware to jump into the MCU's
-built-in I2C bootloader at address `0x41`, erases the flash pages the image
-needs, writes it in 256-byte pages from the end backwards, reads every page
-back to verify it, then jumps to the new code. The apps wait up to 30 s for the
-HAT to answer again. A failed step reports its reason (bus access, bootloader
-did not answer, erase, write, verify, execute); if the HAT no longer answers,
-hold SW3 while applying power to enter the bootloader manually and run
-`pijuiceboot` from a terminal (see `Firmware/README.md`).
+How an update works: the app checks the image first (file name pattern and a
+32–128 KB size, so a truncated download is refused before anything is erased),
+refuses to start on battery below 20 %, asks the `pijuice` service to stay off
+the bus (SIGUSR1, resumed with SIGUSR2 afterwards) and runs
+`pijuiceboot <i2c address> <file> <bus>` on the service worker.
+`pijuiceboot` (`Firmware/pijuiceboot.c`, prebuilt in `Software/Source/bin/`)
+asks the running firmware to jump into the MCU's built-in I2C bootloader at
+address `0x41`, erases the flash pages the image needs, writes it in 256-byte
+pages **from the last page down to page 0**, reads every page back to verify
+it, then jumps to the new code. The apps wait up to 30 s for the HAT to answer
+again. A failed step reports its reason (bus access, bootloader did not
+answer, erase, write, verify, execute) together with the flasher's last lines.
 
-Stop the `pijuice` service before a manual `pijuiceboot` run so its polling
-does not interleave with the bootloader protocol.
+Because page 0 (the vector table) is written last, an interrupted or failed
+write leaves nothing bootable: the LEDs stay off and I2C address `0x14` is
+silent. This is deliberate, so a half-written image can never run. Recover by
+holding SW3 while applying power, which enters the bootloader without the
+firmware's help, then run from a terminal:
+
+```bash
+sudo systemctl stop pijuice
+pijuiceboot 14 /usr/share/pijuice/data/firmware/PiJuice-V1.6_2021_09_10.elf.binary [bus] [bootloader address]
+sudo systemctl start pijuice
+```
+
+The bus defaults to 1 and the bootloader address to `41` (hex). The GUI and
+CLI pass the configured bus automatically.
 
 ## PiJuice CLI
 

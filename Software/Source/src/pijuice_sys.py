@@ -93,6 +93,16 @@ def _EvalChargeLimit(status):
         chargeLimitMessage = message
 
 
+_pausedUntil = 0.0
+
+
+def _PausePolling(signum, _frame):
+    """SIGUSR1: stay off the bus for two minutes (firmware flash); SIGUSR2: resume."""
+    global _pausedUntil
+    _pausedUntil = time.monotonic() + 120 if signum == signal.SIGUSR1 else 0.0
+    log.info('Polling %s', 'paused for a firmware update' if _pausedUntil else 'resumed')
+
+
 def _RestoreWakeup():
     """Re-arm what the HAT forgets after a full battery drain (upstream #1035,
     #760, #853): the RTC clock, the alarm + wakeup enable saved by the UIs, and
@@ -583,8 +593,13 @@ def main():
         global dopoll
         dopoll = False
     signal.signal(signal.SIGTERM, stop_tracking)
+    signal.signal(signal.SIGUSR1, _PausePolling)
+    signal.signal(signal.SIGUSR2, _PausePolling)
     tick = 0
     while dopoll:
+        if time.monotonic() < _pausedUntil:
+            time.sleep(1)
+            continue
         ret = pijuice.status.GetStatus()
         if ret['error'] != 'NO_ERROR':
             log.error('Status read failed: %s', ret['error'])

@@ -291,7 +291,8 @@ class SettingsTests(unittest.TestCase):
     def test_firmware_failure_allows_retry(self):
         view = self.view(FirmwareView)
         view._bin_file = '/tmp/test-firmware.bin'
-        self.service.flash_firmware = lambda _p: 1
+        def fail(_p): raise PiJuiceError('PAGE_VERIFY_ERROR (verify failed 11)', 'firmware')
+        self.service.flash_firmware = fail
         view._do_flash(None)
         drain()
         self.assertTrue(view._update_btn.get_sensitive())

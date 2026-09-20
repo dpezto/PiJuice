@@ -86,6 +86,17 @@ pijuice-base; urgency=low
 * pijuice_power 1.3: `cycle_count`, `health` and `time_to_empty_now`, fed by
   the daemon from battery history and the HAT fault flags
 
+* Firmware update:
+    - `pijuiceboot` takes the I2C bus and bootloader address as optional
+      arguments (were hardcoded to `/dev/i2c-1` and `0x41`); dead UART/readout
+      code removed; rebuilt for arm64 and ARMv6 (Pi Zero)
+    - The service refuses an image whose name or size (32–128 KB) is not a
+      PiJuice firmware before anything is erased
+    - The daemon pauses its polling around a flash (SIGUSR1/SIGUSR2, two-minute
+      safety timeout) so it never interleaves with the bootloader protocol
+    - Failures carry the flasher's last output lines (e.g. `verify failed 11`)
+    - README documents the fail-safe write order and the SW3 recovery
+
 * pijuice_power 1.2:
     - `charge_full_design` is its own value (it aliased `charge_full`)
     - No phantom battery before the daemon writes (`present = 0`, `capacity = 0`)

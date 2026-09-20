@@ -4,8 +4,17 @@ There are two ways in which you can upgrade the firmware for the PiJuice. You ca
 
 ### Usage:
 ```text
-pijuiceboot i2c_address path_to_firmware_binary
+pijuiceboot i2c_address path_to_firmware_binary [i2c_bus] [bootloader_address]
 ```
+`i2c_bus` defaults to 1, `bootloader_address` to 41 (hex). The binaries in
+`Software/Source/bin/` are built from `pijuiceboot.c` with:
+```bash
+gcc -O2 -o pijuiceboot64 pijuiceboot.c
+arm-linux-gnueabihf-gcc -O2 -marm -march=armv6 -mfpu=vfp -mfloat-abi=hard -o pijuiceboot32 pijuiceboot.c
+```
+The 32-bit build is cross-compiled on Debian (its startup objects tag the file
+ARMv7) but contains no ARMv7-only instructions and links only `libc.so.6`, so
+it runs on a Pi Zero. Rebuild natively on a 32-bit Pi OS if in doubt.
 
 ### Example:
 ```bash

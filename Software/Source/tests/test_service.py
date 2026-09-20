@@ -1,0 +1,54 @@
+"""Service-layer checks that need no hardware: firmware image validation and flash reporting."""
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import pijuice_service as svc
+from pijuice_service import PiJuiceError, PiJuiceService, check_firmware_file
+
+
+class ServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.image = Path(self.tmp.name, 'PiJuice-V1.6_2021_09_10.elf.binary')
+        self.image.write_bytes(b'\xff' * 80000)
+        self.service = PiJuiceService(config_path=str(Path(self.tmp.name, 'c.json')), connect=False)
+        self.service.pj = SimpleNamespace(config=SimpleNamespace(interface=SimpleNamespace(GetAddress=lambda: 0x14)))
+
+    def tearDown(self):
+        self.service.close()
+        self.tmp.cleanup()
+
+    def test_image_must_look_like_a_pijuice_firmware(self):
+        check_firmware_file(str(self.image))
+        with self.assertRaisesRegex(PiJuiceError, 'file name'):
+            check_firmware_file(str(Path(self.tmp.name, 'firmware.bin')))
+        self.image.write_bytes(b'\xff' * 1000)
+        with self.assertRaisesRegex(PiJuiceError, '1000 bytes'):
+            check_firmware_file(str(self.image))
+        with self.assertRaises(PiJuiceError):
+            check_firmware_file(str(Path(self.tmp.name, 'PiJuice-V9.9_2030_01_01.elf.binary')))
+
+    def test_flash_pauses_daemon_and_reports_flasher_output(self):
+        signals = []
+        run = SimpleNamespace(returncode=256 - 9, stdout='Page 12 programmed successfully\nverify failed 11\n')
+        with patch.object(svc, 'signal_service', side_effect=lambda sig, _pid: signals.append(sig)), \
+             patch.object(svc.subprocess, 'run', return_value=run) as popen:
+            with self.assertRaisesRegex(PiJuiceError, 'PAGE_VERIFY_ERROR.*verify failed 11'):
+                self.service.flash_firmware(str(self.image))
+            self.assertEqual(signals, ['SIGUSR1', 'SIGUSR2'])
+            self.assertEqual(popen.call_args.args[0], ['pijuiceboot', '14', str(self.image), '1'])
+            run.returncode = 0
+            self.assertEqual(self.service.flash_firmware(str(self.image)), 0)
+        with patch.object(svc.subprocess, 'run') as popen:
+            with self.assertRaises(PiJuiceError):
+                self.service.flash_firmware(str(Path(self.tmp.name, 'x.bin')))
+            popen.assert_not_called()  # a bad image never reaches the flasher
+
+
+if __name__ == '__main__':
+    unittest.main()
