@@ -76,9 +76,9 @@ updates. To set it up on a manual install:
 
 ```bash
 sudo apt-get install -y dkms
-sudo cp -r Software/kernel/pijuice_power /usr/src/pijuice-power-1.1
-sudo dkms add -m pijuice-power -v 1.1
-sudo dkms install -m pijuice-power -v 1.1
+sudo cp -r Software/kernel/pijuice_power /usr/src/pijuice-power-1.2
+sudo dkms add -m pijuice-power -v 1.2
+sudo dkms install -m pijuice-power -v 1.2
 echo pijuice_power | sudo tee /etc/modules-load.d/pijuice_power.conf
 sudo cp Software/kernel/pijuice_power/pijuice_power-modprobe.conf /etc/modprobe.d/pijuice_power.conf
 sudo modprobe pijuice_power
@@ -90,9 +90,14 @@ right after every load (boot or manual `modprobe`), so the unprivileged daemon
 can update the reading. The daemon logs to the journal (once) when the node is
 missing or an attribute is not writable.
 
-Besides `capacity`, the module exposes `charge_full`, `charge_full_design` and
-`charge_now` (µAh, from the HAT battery profile), for readers such as the
-wf-panel-pi battery widget that ignore `capacity`.
+Besides `capacity`, the module exposes `charge_full_design` (µAh, the HAT
+battery profile capacity), `charge_full` (the learned full capacity from battery
+history once a qualifying discharge exists, otherwise the profile capacity) and
+`charge_now`, for readers such as the wf-panel-pi battery widget that ignore
+`capacity`. The feed runs whether or not the System Task switch is on. Until the
+service writes, the module reports `present = 0`; the service also writes
+`present = 0` on stop, so a stopped service is not shown as a stale battery. A
+uevent is raised only when a value changes.
 
 Packages are built with `Software/Source/pckg-pijuice.sh` (plain `dpkg-deb`,
 output in `Software/Source/deb_dist/`).

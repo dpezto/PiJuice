@@ -4,6 +4,22 @@
 pijuice-gui; urgency=low
 
 * src/pijuice_gtk.py:
+    - Status page: the power-switch dropdown is no longer a draft, so changing it
+      without pressing Set cannot block closing the window
+    - Battery page: no toast storm when the HAT disconnects; the health poll
+      pauses and the condition row shows the error instead
+    - Confirmation dialogs cannot stack (double-click on reset/close no longer
+      queues two actions); the close-while-writing warning is a toast, not the
+      window title
+    - Wakeup: refreshing the alarm resets every field, so typed text never
+      survives as if the device had reported it; firmware pre-check is a read
+      (no page lock) and the post-flash reconnect retries for up to 30 s
+    - Apply handlers catch every exception (draft kept, message shown)
+    - IO page: replaced parameter rows are dropped from draft tracking (leak)
+    - Shared `readable`, `schedule_values`, alarm parsing and version packing
+      now come from `pijuice_service` (one copy for CLI and GUI)
+    - Dead code removed: `_int`, base title/slug defaults, a hand copy of
+      `immediate()` in the battery view
     - Rebuilt on libadwaita: HIG-consistent rows and **automatic light/dark
       theme following the system** (via `Adw.Application`/`StyleManager`)
     - Follow the system dark theme on Raspberry Pi OS too, which signals dark via
@@ -27,7 +43,73 @@ pijuice-gui; urgency=low
 pijuice-base; urgency=low
 
 * src/pijuice_cli.py:
-    - Fix crash (RecursionError) on the first keypress with urwid >= 2.4:
+    - All HAT access goes through `pijuice_service.PiJuiceService`, like the
+      GUI and tray; the 59 raw library calls and 40 hand-rolled error checks are
+      gone, and a failed device call always lands on a message, not a traceback
+      (checkbox/radio callbacks included)
+    - Fix: a changed I2C address is now persisted to `board.general.i2c_addr`
+      (it was silently dropped, so the next launch reconnected on the old one)
+    - Fix: firmware update `NameError` on the "unknown address" path; the
+      post-flash wait is bounded (30 s) and the flash runs on the service worker
+    - Fix: battery profile apply stops at the first failed write instead of
+      stacking dialogs and writing the profile anyway; RSoC estimation is only
+      written on firmware >= 1.3
+    - Fix: the RTC clock keeps ticking behind a dialog; stale IO field errors no
+      longer block Apply after a mode change; the LED function label follows a
+      colour edit; a missing `/run/pijuice` gives a message, not a traceback
+    - Dead code removed (unused `_do_back`, `_clear_text_edits`, vendored
+      NumEdit/FloatEdit options, unreachable Pile hoisting path); the CLI-only
+      `notify_service`/save copies are replaced by `service.save_section`
+
+* pijuice_service.py:
+    - Wrappers for the remaining CLI-only calls (watchdog, wakeup-on-charge,
+      run pin, power inputs/regulator, ID EEPROM, I2C address, custom profiles)
+    - Shared helpers: `readable`, `schedule_values`, `alarm_fields`,
+      `pack_version`/`version_to_str`, `firmware_error`, `rtc_fields_now`
+    - Removed unused API (`set_led_color`, `submit_method`, context manager,
+      `reload_config`, `save_and_notify`, `get_led_state`,
+      `get_battery_current`, `clear_alarm_flag`, `LED_FUNCTIONS`)
+
+* src/pijuice_sys.py:
+    - One `GetStatus` per second; battery tracking, the charge limit and the
+      power_supply feed run every 5 s regardless of the System Task switch (the
+      feed used to stop when System Task was off)
+    - Feeds `charge_full_design` (profile) and `charge_full` (learned capacity
+      once battery history has a qualifying discharge); writes `present = 0` on
+      stop
+
+* pijuice_power 1.2:
+    - `charge_full_design` is its own value (it aliased `charge_full`)
+    - No phantom battery before the daemon writes (`present = 0`, `capacity = 0`)
+    - A uevent only when a value changes (was one per write, ~1.4/s)
+    - `charge_now` computed without integer truncation
+    - postrm removes every registered module version, not a hardcoded one
+
+* pijuice.py (upstream API unchanged): `SetTime` accepts fractional subseconds
+  (any non-zero value was rejected); `SetTime`/`SetAlarm` reject 60 for
+  seconds/minutes; no-op branch and bare-name handler removed; `--version`
+  without an argument no longer raises
+
+* src/pijuice_log.py: wrapped in `main()` (import-safe), honours the configured
+  I2C bus/address via `PiJuiceService`, no longer crashes on MESSAGE/VALUE
+  records (`'dict' object is not callable`), `--enable`/`--disable` exit after
+  acting, bounded read loop
+
+* Packaging:
+    - Removed the dead stdeb/distutils path (`setup.py`, `stdeb.cfg`,
+      `debian-*/rules`, `VERSION`); `pckg-pijuice.sh` is the only build
+    - `pijuice.service` owns `/run/pijuice` (`RuntimeDirectory`, 0770,
+      preserved) instead of a tmpfiles.d entry
+    - sudoers: `systemctl *` narrowed to `systemctl list-jobs`, dead
+      `SIGUSR1/2` rules dropped, `%pijuice` may `kill -SIGHUP` so the desktop
+      apps can reload the daemon without the distro's first-user NOPASSWD
+    - pijuice-gui depends on pijuice-base >= 1.9 (it imports `pijuice_battery`)
+    - Tray PID file and its prerm handling removed (nothing read it)
+
+* tests/: CLI tests drive a service-backed CLI; new checks for profile apply
+  stop-on-failure, I2C address persistence, status switch not-a-draft, dialog
+  stacking, learned capacity
+
       `_ContentArea.original_widget` was built from urwid's deprecated
       `_get/_set_original_widget` shims, which now delegate back to the property
     - Route config load/save and the service SIGHUP notify through
