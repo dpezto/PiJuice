@@ -158,14 +158,15 @@ class _View(Adw.PreferencesPage):
 
     @staticmethod
     def _controls(widget):
-        # Stop at composite controls: their internal entries are implementation details.
+        # Stop at composite controls: their internal entries are implementation
+        # details. Rows go on: a prefix/suffix we add (a script's name) is ours.
         for typ, prop in ((Adw.ComboRow, "selected"), (Gtk.SpinButton, "value"),
                           (Adw.EntryRow, "text"), (Gtk.Entry, "text"),
                           (Gtk.Switch, "active")):
             if isinstance(widget, typ):
                 if not getattr(widget, "_immediate", False):
                     yield widget, prop
-                if not isinstance(widget, Adw.ComboRow):
+                if not isinstance(widget, (Adw.ComboRow, Adw.EntryRow)):
                     return
                 break
         if isinstance(widget, Gtk.Popover):

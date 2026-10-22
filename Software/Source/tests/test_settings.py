@@ -339,7 +339,9 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(any('_' in s for s in strings), strings)
         self.assertEqual(row.get_title(), 'Press')
         scripts = self.view(UserScriptsView)
+        self.assertFalse(scripts.dirty)
         scripts._names['USER_FUNC2'].set_text('Lights')
+        self.assertTrue(scripts.dirty)  # a name-only edit must expose Apply
         scripts._on_apply(None)
         drain()
         saved = json.loads(Path(self.service.config_path).read_text())
