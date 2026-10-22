@@ -1,0 +1,44 @@
+# git-cliff: the next version and the changelogs come from Conventional
+# Commits since the last vX.Y.Z tag. Run through ./release.sh, which also
+# writes the Debian changelog entries, the version and the tag.
+
+[changelog]
+# No header: CHANGELOG.md keeps its hand-written history below the new entries.
+header = ""
+body = """
+## Version {{ version | trim_start_matches(pat="v") }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | split(pat="\n") | first | trim }}\
+{% if commit.breaking %} (**breaking**){% endif %}
+{%- endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+sort_commits = "oldest"
+# The <!-- n --> prefixes fix the section order; striptags removes them.
+commit_parsers = [
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+    { message = "^docs", group = "<!-- 4 -->Documentation" },
+    { message = "^build", group = "<!-- 5 -->Build" },
+    { message = "^test", group = "<!-- 6 -->Tests" },
+    { message = "^(chore|ci|style)", skip = true },
+]
+
+[bump]
+# feat -> minor, fix/perf/... -> patch, breaking (! or BREAKING CHANGE) -> major
+features_always_bump_minor = true
+breaking_always_bump_major = true
+initial_tag = "v1.11.0"
