@@ -1,3 +1,25 @@
+## Version 1.12.0
+
+### Features
+
+- **firmware:** semver 1.7.0 reported through a new 0xFC command; hosts compare full versions
+
+### Fixes
+
+- **build:** release.sh reports git-cliff errors and writes a tidy CHANGELOG entry
+- **firmware:** declare what was implicit, return from every non-void path
+- **firmware:** wrap-safe power-off deadline, bounded RTC write, charger safety writes, fault bits
+- **firmware:** fuel gauge APA from the profile capacity, errors that count, battery current x2
+- **firmware:** keep code out of the EEPROM erase range, skip unchanged NV writes, ISR flags, LED stop
+
+### Documentation
+
+- **firmware:** 1.7.0 changelog and how to build, test and release
+
+### Build
+
+- **firmware:** one source tree and a Makefile for arm-none-eabi-gcc
+
 ## Version 1.11.0
 
 ### Software

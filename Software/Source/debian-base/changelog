@@ -1,3 +1,21 @@
+pijuice-base (1.12.0) unstable; urgency=low
+
+  * build: release.sh reports git-cliff errors and writes a tidy CHANGELOG
+    entry
+  * firmware: one source tree and a Makefile for arm-none-eabi-gcc
+  * firmware: declare what was implicit, return from every non-void path
+  * firmware: wrap-safe power-off deadline, bounded RTC write, charger safety
+    writes, fault bits
+  * firmware: fuel gauge APA from the profile capacity, errors that count,
+    battery current x2
+  * firmware: keep code out of the EEPROM erase range, skip unchanged NV
+    writes, ISR flags, LED stop
+  * firmware: semver 1.7.0 reported through a new 0xFC command; hosts compare
+    full versions
+  * firmware: 1.7.0 changelog and how to build, test and release
+
+ -- Dai López <dpezto@gmail.com>  Thu, 22 Oct 2026 00:10:56 -0600
+
 pijuice-base (1.11.0) unstable; urgency=medium
 
   * pijuice_sys: an enabled low-charge/low-voltage event with no System Task

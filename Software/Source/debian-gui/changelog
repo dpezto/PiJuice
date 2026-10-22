@@ -1,3 +1,10 @@
+pijuice-gui (1.12.0) unstable; urgency=low
+
+  * firmware: semver 1.7.0 reported through a new 0xFC command; hosts compare
+    full versions
+
+ -- Dai López <dpezto@gmail.com>  Thu, 22 Oct 2026 00:10:56 -0600
+
 pijuice-gui (1.11.0) unstable; urgency=low
 
   * pijuice_gtk: low-battery shutdown warnings on System Task / System
