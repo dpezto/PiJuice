@@ -30,15 +30,12 @@ SRC := $(APP:%=Src/%.c) Core/Src/system_stm32f0xx.c \
 ASM := STM32CubeIDE/startup_stm32f030cctx.s
 OBJ := $(SRC:%.c=$(BUILD)/%.o) $(ASM:%.s=$(BUILD)/%.o)
 
-# GCC >= 14 makes these errors; the 2018 toolchain only warned. Kept visible as warnings.
-LEGACY  := -Wno-error=implicit-function-declaration -Wno-error=int-conversion \
-           -Wno-error=incompatible-pointer-types
 MCU     := -mcpu=cortex-m0 -mthumb -mfloat-abi=soft
 DEFS    := -DUSE_HAL_DRIVER -DSTM32F030xC -DDEBUG -DLOGGING
 INCS    := -IInc -IDrivers/CMSIS/Include -IDrivers/CMSIS/Device/ST/STM32F0xx/Include \
            -IDrivers/STM32F0xx_HAL_Driver/Inc -IDrivers/STM32F0xx_HAL_Driver/Inc/Legacy
 CFLAGS  := $(MCU) $(DEFS) $(INCS) -std=gnu11 -Ofast -g3 -Wall -ffunction-sections -fdata-sections \
-           --specs=nano.specs -MMD -MP $(LEGACY)
+           --specs=nano.specs -MMD -MP
 LDFLAGS := $(MCU) -TSTM32CubeIDE/STM32F030CCTX_FLASH.ld --specs=nosys.specs --specs=nano.specs \
            -Wl,--gc-sections -static -Wl,-Map=$(BUILD)/PiJuice.map -Wl,--print-memory-usage \
            -Wl,--start-group -lc -lm -Wl,--end-group

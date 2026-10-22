@@ -7,6 +7,7 @@
 // linux driver for rtc and alarm config.txt: dtoverlay=i2c-rtc,ds1339,wakeup-source
 #include "rtc_ds1339_emu.h"
 #include "stm32f0xx_hal.h"
+extern void Error_Handler(void);
 #include "power_management.h"
 #include "power_source.h"
 #include "logging.h"
@@ -272,6 +273,7 @@ uint8_t RtcGetPointer() {
 uint8_t RtcSetPointer(uint8_t val) {
 	if (val <= 0x0F)
 		rtc_buffer_ptr = val;
+	return rtc_buffer_ptr;
 }
 
 void RtcWriteTime(uint8_t *buffer, uint8_t extended) {

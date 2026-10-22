@@ -7,6 +7,7 @@
 
 #include "analog.h"
 #include "stm32f0xx_hal.h"
+extern void Error_Handler(void);
 #include "nv.h"
 #include "time_count.h"
 #include "power_source.h"

@@ -7,6 +7,7 @@
 
 #include "led.h"
 #include "stm32f0xx_hal.h"
+extern void Error_Handler(void);
 #include "nv.h"
 #include "time_count.h"
 
@@ -227,6 +228,7 @@ uint8_t LedGetParamR(uint8_t func) {
 	} else if (leds[1].func == func) {
 		return leds[1].paramR;
 	}
+	return 0;
 }
 uint8_t LedGetParamG(uint8_t func) {
 	if (leds[0].func == func) {
@@ -234,6 +236,7 @@ uint8_t LedGetParamG(uint8_t func) {
 	} else if (leds[1].func == func) {
 		return leds[1].paramG;
 	}
+	return 0;
 }
 uint8_t LedGetParamB(uint8_t func) {
 	if (leds[0].func == func) {
@@ -241,6 +244,7 @@ uint8_t LedGetParamB(uint8_t func) {
 	} else if (leds[1].func == func) {
 		return leds[1].paramB;
 	}
+	return 0;
 }
 
 #if defined(RTOS_FREERTOS)

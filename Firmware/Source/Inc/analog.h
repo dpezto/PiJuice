@@ -61,6 +61,7 @@ __STATIC_INLINE uint16_t GetSample(uint8_t channel) {
 }
 
 int32_t GetSampleAverageDiff(uint8_t channel1, uint8_t channel2);
+int32_t GetSampleAverage(uint8_t channel);
 
 __STATIC_INLINE uint16_t GetAdcWDGThreshold() {
 	return analogWDGConfig.LowThreshold;

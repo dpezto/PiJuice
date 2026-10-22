@@ -7,6 +7,10 @@
 
 #include "stm32f0xx_hal.h"
 #include "analog.h"
+#include "io_control.h"
+
+extern void Error_Handler(void);
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 #include "nv.h"
 
 TIM_HandleTypeDef htim1;

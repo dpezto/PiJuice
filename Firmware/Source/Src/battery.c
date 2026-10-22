@@ -7,6 +7,7 @@
 
 
 #include "battery.h"
+#include "power_source.h"
 #include "nv.h"
 #include "charger_bq2416x.h"
 #include "config_switch_resistor.h"

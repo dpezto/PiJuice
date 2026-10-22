@@ -7,6 +7,8 @@
 
 #include "nv.h"
 #include "power_management.h"
+#include "analog.h"
+#include "load_current_sense.h"
 #include "charger_bq2416x.h"
 #include "fuel_gauge_lc709203f.h"
 #include "time_count.h"
