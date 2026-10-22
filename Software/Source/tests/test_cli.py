@@ -231,9 +231,12 @@ class CliTests(unittest.TestCase):
         cli.item_chosen('Wakeup Alarm')
         tab=cli._active_tab
         tab.current_config['enabled']=True
-        checkbox=urwid.CheckBox('Wakeup',state=True)
+        checkbox=urwid.CheckBox('Wakeup',state=True,on_state_change=tab._toggle_wakeup)
         self.rtc.SetWakeupEnabled.return_value={'error':'NO_CONNECTION'}
-        tab._toggle_wakeup(checkbox,False)
+        pending=[]
+        cli.loop.set_alarm_in.side_effect=lambda _secs, cb: pending.append(cb)
+        checkbox.set_state(False)  # as a keypress: urwid stores the state after the callback
+        for cb in pending: cb(None, None)
         self.assertTrue(checkbox.state)
         self.assertTrue(tab.current_config['enabled'])
 
@@ -465,6 +468,18 @@ class CliTests(unittest.TestCase):
         self.assertNotIn('Tab', footer)
         self.assertIn('? keys', footer)
         cli.main_menu()
+
+    def test_applying_one_pin_keeps_the_other_pins_draft(self):
+        cli.item_chosen('IO')
+        tab = cli._active_tab
+        tab.current_config[0]['pull'] = 'PULLDOWN'
+        tab.current_config[1]['pull'] = 'PULLUP'
+        cli._dirty = True
+        tab._apply_settings(None, 0)
+        self.config.SetIoConfiguration.assert_called_once()
+        self.assertTrue(cli._dirty)  # IO2 was not written
+        tab._apply_settings(None, tab.IO_PINS_COUNT)
+        self.assertFalse(cli._dirty)
 
     def test_opening_a_chooser_and_going_back_is_not_a_draft(self):
         self.config.GetIoConfiguration.side_effect = lambda pin: ok(

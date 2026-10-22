@@ -136,6 +136,12 @@ def _validate_edit(widget, text, kind, lo, hi, key):
     return text  # Keep incomplete input editable until Apply.
 
 
+def _revert_checkbox(checkbox, state):
+    """urwid emits "change" before it stores the new state, so a rollback inside
+    the callback is overwritten; undo it once the callback has returned."""
+    loop.set_alarm_in(0, lambda *_a: checkbox.set_state(state, do_callback=False))
+
+
 def confirmation_dialog(text, next, nextno="", single_option=True):
     global _in_dialog, _dialog_cancel
     if single_option and any(word in text.lower() for word in ("successfully", "settings saved", "settings have been refreshed", "settings have been applied")):
@@ -1406,7 +1412,9 @@ class IOTab(object):
         return config
 
     def _apply_settings(self, button, pin_id):
+        global _baseline, _dirty
         pins = range(self.IO_PINS_COUNT) if pin_id >= self.IO_PINS_COUNT else [pin_id]
+        previous = copy.deepcopy(_baseline)
         for i in pins:
             try:
                 service.set_io_config(i + 1, self.current_config[i], True)
@@ -1416,6 +1424,12 @@ class IOTab(object):
             "Settings successfully updated for " + ("all pins" if len(pins) > 1 else "IO%d" % (pin_id + 1)),
             next=self.main, single_option=True,
         )
+        if len(pins) == 1 and isinstance(previous, list):
+            # Only this pin was written: the other pin's edits stay a draft.
+            previous[pin_id] = copy.deepcopy(self.current_config[pin_id])
+            _baseline = previous
+            _dirty = _snapshot() != _baseline
+            _render_header()
 
 
 class BatteryProfileTab(object):
@@ -1958,7 +1972,7 @@ class WakeupAlarmTab(object):
         try:
             service.set_wakeup_enabled(state)
         except PiJuiceError as exc:
-            checkbox.set_state(previous, do_callback=False)
+            _revert_checkbox(checkbox, previous)
             _flash("Wakeup unchanged: %s" % exc, "error")
             return
         self.current_config["enabled"] = state
@@ -2798,7 +2812,7 @@ class BatteryCareTab:
         try:
             rc = service.set_charge_policy(policy)
         except (OSError, ValueError) as exc:
-            checkbox.set_state(self.current_config["enabled"], do_callback=False)
+            _revert_checkbox(checkbox, self.current_config["enabled"])
             _flash("Could not save charge limit: %s" % exc, "error")
             return
         self.current_config = policy
@@ -2842,7 +2856,7 @@ class SettingsTab(object):
             _flash("Terminal preference saved.", "ok")
         else:
             pijuiceConfigData["cli_settings"]["vim_keys"] = previous
-            checkbox.set_state(previous, do_callback=False)
+            _revert_checkbox(checkbox, previous)
         _render_header()
 
 
