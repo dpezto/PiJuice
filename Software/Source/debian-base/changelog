@@ -16,6 +16,8 @@ pijuice-base (1.11) unstable; urgency=medium
     writes only on change, Nice=10. ~1.5 % -> ~0.1 % of a core.
   * Wakeup restore record complete; firmware flash waits for the paused
     daemon; pijuiceboot32 rebuilt natively for ARMv6 (crashed on a Pi Zero).
+  * postinst byte-compiles the Python modules (the daemon cannot write
+    __pycache__ and recompiled them in memory on every start).
 
  -- Dai López <dpezto@gmail.com>  Wed, 21 Oct 2026 22:12:54 -0600
 

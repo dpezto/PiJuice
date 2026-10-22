@@ -124,6 +124,11 @@ dkms install -m "$PJ_MOD" -v "$PJ_MOD_VER" --force \
 	|| { echo "pijuice-base: dkms install $PJ_MOD/$PJ_MOD_VER failed (kernel headers installed?)" >&2; exit 1; }
 modprobe -r pijuice_power 2>/dev/null || true
 modprobe pijuice_power || { echo "pijuice-base: modprobe pijuice_power failed" >&2; exit 1; }
+# Byte-compile the modules: the daemon runs as pijuice and cannot write
+# __pycache__, so stale or missing .pyc meant compiling them in memory on every
+# start (~2.5 MB more RSS on a Pi Zero W).
+python3 -m compileall -q /usr/lib/python3/dist-packages/pijuice.py \
+	/usr/lib/python3/dist-packages/pijuice_service.py /usr/lib/python3/dist-packages/pijuice_battery.py || true
 # Pick up a changed unit file and the new daemon.
 systemctl daemon-reload
 systemctl restart pijuice.service

@@ -40,6 +40,10 @@ pijuice-base; urgency=medium
     - Fix: the wakeup restore record always gets both schedule and enable
     - Flash waits for the paused daemon to leave the bus
 
+* debian-base/postinst:
+    - Byte-compiles the Python modules; without .pyc the daemon (which cannot
+      write `__pycache__`) recompiled them on every start, ~2.5 MB more RSS
+
 * bin/pijuiceboot32:
     - Fix: rebuilt natively for ARMv6; the cross build crashed on a Pi Zero
 
