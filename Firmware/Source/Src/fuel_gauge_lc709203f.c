@@ -6,6 +6,7 @@
  */
 
 #include "fuel_gauge_lc709203f.h"
+#include "fuel_gauge_apa.h"
 #include "stm32f0xx_hal.h"
 #include "crc8_atm.h"
 #include "time_count.h"
@@ -191,7 +192,7 @@ int8_t FuelGaugeIcInit(void) {
 		if (succ != 0) return 1;
 
 		// set APA
-		succ = FuelGaugeWriteWord(0x0b, 0x36); //FuelGaugeWriteWord(0x0b, 0x2d);//
+		succ = FuelGaugeWriteWord(0x0b, FuelGaugeApa(currentBatProfile != NULL ? currentBatProfile->capacity : 3000));
 		if (succ != 0) return 2;
 
 		// set change of the parameter
@@ -278,25 +279,23 @@ void SocEvaluateFuelGaugeIc(void) {
 	volatile int8_t succ;
 	// read battery voltage
 	succ = FuelGaugeReadWord(0x09, &batteryVoltage);
-	if (succ == 0) {
-		fuelGaugeI2cErrorCounter = 0;
-	} else if (succ > 0) {
-		fuelGaugeI2cErrorCounter = fuelGaugeI2cErrorCounter < 127 ? fuelGaugeI2cErrorCounter + 1 : 127;
-		return;
-	}
-
 	// read state of charge
-	succ = FuelGaugeReadWord(0x0F, &batteryRsoc);
-	if (succ == 0) {
-		fuelGaugeI2cErrorCounter = 0;
-		soc = ((int32_t)batteryRsoc) << 21;
-	} else if (succ > 0) {
+	if (succ == 0) succ = FuelGaugeReadWord(0x0F, &batteryRsoc);
+	// A CRC mismatch (-1) is an error too: it used to fall through with a
+	// stale RSOC, and a good voltage read reset the count before a failing
+	// RSOC read, so a stuck gauge never reached the MCU fallback.
+	if (succ != 0) {
 		fuelGaugeI2cErrorCounter = fuelGaugeI2cErrorCounter < 127 ? fuelGaugeI2cErrorCounter + 1 : 127;
 		return;
 	}
+	fuelGaugeI2cErrorCounter = 0;
+	soc = ((int32_t)batteryRsoc) << 21;
 
 	if (batteryRsoc != prevRsoc && (HAL_GetTick() - dischargeCount) > 500) {
-		dischargeRate = ((int32_t)prevRsoc - batteryRsoc) * (int32_t)1843200 / (int32_t)(HAL_GetTick() - dischargeCount);
+		// ITE is in 0.1 %: mA = dITE/1000 * capacity / (dt_ms/3600000) = dITE*capacity*3600/dt_ms;
+		// with the >>10 below the factor is 3600*1024 (it was half). 64-bit: a large
+		// gauge jump would overflow int32 at this scale.
+		dischargeRate = (int32_t)(((int64_t)prevRsoc - batteryRsoc) * 3686400 / (int32_t)(HAL_GetTick() - dischargeCount));
 		//__disable_irq();
 		batteryCurrent = (dischargeRate * (currentBatProfile!=NULL ? currentBatProfile->capacity : 10000)) >> 10;
 		//__enable_irq();
@@ -305,12 +304,15 @@ void SocEvaluateFuelGaugeIc(void) {
 		prevRsoc = batteryRsoc;
 	} else if ((HAL_GetTick() - dischargeCount) > 1843200) {
 		dischargeRate = 0;
+		batteryCurrent = 0;
 		dischargeCount = HAL_GetTick();
 		dischargeCountTemp = HAL_GetTick();
 	} else if ( (HAL_GetTick() - dischargeCountTemp) > 50000) {
 		int16_t newCurr;
-		if (dischargeRate!=0) newCurr = (((int32_t)(dischargeRate>0?1:-1)) * (int32_t)1843200 / (int32_t)(HAL_GetTick() - dischargeCount) * (currentBatProfile!=NULL ? currentBatProfile->capacity : 10000)) >> 10;
+		// No RSOC step for 50 s: the load is at most one step over the elapsed time.
+		if (dischargeRate!=0) newCurr = (((int32_t)(dischargeRate>0?1:-1)) * (int32_t)3686400 / (int32_t)(HAL_GetTick() - dischargeCount) * (currentBatProfile!=NULL ? currentBatProfile->capacity : 10000)) >> 10;
 		else newCurr = 0;
+		batteryCurrent = newCurr; // computed and dropped before
 
 		dischargeCountTemp = HAL_GetTick();
 	}
@@ -354,7 +356,7 @@ static void FuelGaugeTask(void *argument) {
 				int32_t dif= (int32_t)ocvSocTbl[ind]-batteryVoltage;
 				uint16_t rsoc = ((int32_t)rSocTbl[ind] * rSocTempCompesateTbl[(uint8_t)batteryTemp]) >> 8;
 				batteryCurrent = (dif*(((uint32_t)c0*rsoc)>>6))>>10;
-				int32_t dSoC = (((int32_t)dif*dt*(((int32_t)596*rsoc)>>8)))>>8;//dif*596*dt/res;
+				int32_t dSoC = (int32_t)(((int64_t)dif*dt*(((int32_t)596*rsoc)>>8))>>8);//dif*596*dt/res; 64-bit: int32 overflowed for long dt or large dif
 				soc -= dSoC;
 				soc = soc<=2139095040?soc:2139095040;
 				soc = (soc>=0)?soc:0;
@@ -517,7 +519,7 @@ void FuelGaugeTask(void) {
 				int32_t dif= (int32_t)ocvSocTbl[ind]-batteryVoltage;
 				uint16_t rsoc = ((int32_t)rSocTbl[ind] * rSocTempCompesateTbl[(uint8_t)batteryTemp]) >> 8;
 				batteryCurrent = (dif*(((uint32_t)c0*rsoc)>>6))>>10;
-				int32_t dSoC = (((int32_t)dif*dt*(((int32_t)596*rsoc)>>8)))>>8;//dif*596*dt/res;
+				int32_t dSoC = (int32_t)(((int64_t)dif*dt*(((int32_t)596*rsoc)>>8))>>8);//dif*596*dt/res; 64-bit: int32 overflowed for long dt or large dif
 				soc -= dSoC;
 				soc = soc<=2139095040?soc:2139095040;
 				soc = (soc>=0)?soc:0;
@@ -657,11 +659,13 @@ void FuelGaugeTask(void) {
 
 void FuelGaugeSetBatProfile(const BatteryProfile_T *batProfile) {
 
-	if ( batProfile != NULL && batProfile->ntcB != 0xFFFF /*&& batProfile->ntcResistance == 1000*/ ) {
-		if ( fuelGaugeI2cErrorCounter < 5 && fuelGaugeI2cErrorCounter >= 0 ) {
+	if ( batProfile != NULL && fuelGaugeI2cErrorCounter < 5 && fuelGaugeI2cErrorCounter >= 0 ) {
+		// declare as non initialized on failure
+		if (FuelGaugeWriteWord(0x0b, FuelGaugeApa(batProfile->capacity)) != 0) {
+			fuelGaugeI2cErrorCounter = -1;
+		} else if ( batProfile->ntcB != 0xFFFF /*&& batProfile->ntcResistance == 1000*/ ) {
 			// Set NTC B constant
 			if (FuelGaugeWriteWord(0x06, batProfile->ntcB)!= 0) {
-				// declare as non initialized
 				fuelGaugeI2cErrorCounter = -1;
 			}
 		}

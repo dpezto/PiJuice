@@ -4,6 +4,7 @@
 #
 #   make            build/PiJuice.elf, .hex, .bin and .map
 #   make release    also PiJuice-V<version>_<date>.elf.binary next to the old images
+#   make test       host-side checks of hardware-free logic
 #   make size       flash/RAM use
 #
 # The sources and the link order follow STM32CubeIDE/.project.
@@ -65,13 +66,18 @@ release: all
 	cp $(BUILD)/PiJuice.hex ../PiJuice-V$(VERSION)_$(DATE).elf.hex
 	@echo ../PiJuice-V$(VERSION)_$(DATE).elf.binary
 
+# Host-side checks of hardware-free logic (native gcc).
+test:
+	@mkdir -p $(BUILD)/tests
+	@for t in tests/test_*.c; do gcc -Wall -Werror -IInc $$t -o $(BUILD)/$${t%.c} && ./$(BUILD)/$${t%.c} || exit 1; done
+
 size: $(BUILD)/PiJuice.elf
 	$(SIZE) $<
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all release size clean
+.PHONY: all release test size clean
 -include $(OBJ:.o=.d)
 
 # CubeIDE's sysmem.c predates newlib dropping caddr_t.
