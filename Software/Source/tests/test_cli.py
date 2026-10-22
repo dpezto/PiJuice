@@ -202,6 +202,16 @@ class CliTests(unittest.TestCase):
         self.assertTrue(cli._dirty)
         self.assertIn('Your edits are kept',cli._notice[1])
 
+    def test_system_events_warns_when_low_charge_cannot_fire(self):
+        cli.item_chosen('System Events')
+        texts = lambda: [w.text for w in cli._walk_widgets(cli.main.original_widget) if isinstance(w, urwid.Text)]
+        self.assertFalse(any('never fire' in t for t in texts()))
+        checkbox = next(w for w in cli._walk_widgets(cli.main.original_widget)
+                        if isinstance(w, urwid.CheckBox) and w.label.startswith('Low charge'))
+        cli.pijuiceConfigData['system_events']['low_charge']['function'] = 'SYS_FUNC_HALT'
+        checkbox.set_state(True)  # System Task is off in the fixture
+        self.assertTrue(any('Low charge will never fire' in t for t in texts()))
+
     def test_alarm_validation_and_multiple_hours(self):
         cli.item_chosen('Wakeup Alarm')
         tab=cli._active_tab

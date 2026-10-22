@@ -42,6 +42,7 @@ from pijuice_service import (  # noqa: E402
     alarm_fields,
     function_description,
     function_label,
+    low_energy_warnings,
     pack_version,
     readable,
     user_function_names,
@@ -348,6 +349,20 @@ class _View(Adw.PreferencesPage):
         self.flash("Saved." if rc == 0 else
                    "Saved, but the background service did not reload. Use Retry service reload.")
         self._retry_notify.set_visible(rc != 0)
+        if getattr(self, "_low_note", None) is not None:
+            self._show_low_energy()
+
+    def add_low_energy_note(self):
+        """Warn, from the saved config, when a low-battery shutdown cannot fire."""
+        self._low_note = Gtk.Label(xalign=0, wrap=True)
+        self._low_note.add_css_class("warning")
+        self.add_group().add(self._low_note)
+        self._show_low_energy()
+
+    def _show_low_energy(self):
+        text = "\n".join(low_energy_warnings(self.service.config))
+        self._low_note.set_text(text)
+        self._low_note.set_visible(bool(text))
 
     # --- Adwaita row builders ------------------------------------------------
     def add_group(self, title=None, description=None):
@@ -944,6 +959,7 @@ class SystemEventsView(_View):
             switch.update_property([Gtk.AccessibleProperty.LABEL], [text + " enabled"])
             row.add_prefix(switch)
             self._rows[key] = (switch, row)
+        self.add_low_energy_note()
         self.add_status()
 
     def _on_apply(self, _btn):
@@ -1021,6 +1037,7 @@ class SystemTaskView(_View):
             self._rows[sec] = (switch, entry, field, typ, lo, hi)
             switch.bind_property("active", entry, "sensitive", 2)
             entry.update_property([Gtk.AccessibleProperty.LABEL], [label + ": " + vlabel])
+        self.add_low_energy_note()
         self.add_status()
 
     def _on_apply(self, _btn):

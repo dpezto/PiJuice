@@ -127,6 +127,35 @@ FUNCTIONS = {
 }
 
 
+LOW_ENERGY_CHECKS = (('low_charge', 'min_charge', 'Low charge', 'Minimum charge'),
+                     ('low_battery_voltage', 'min_bat_voltage', 'Low battery voltage', 'Minimum battery voltage'))
+
+
+def low_energy_warnings(config):
+    """Why a configured low-battery shutdown would not happen.
+
+    The service only fires a low-energy System Event while System Task and its
+    matching check (Minimum charge / voltage) are on; any half of the pair alone
+    does nothing, and that is how a Pi ends up dying on an empty battery."""
+    task = (config or {}).get('system_task') or {}
+    events = (config or {}).get('system_events') or {}
+    out = []
+    for event, check, ev_label, check_label in LOW_ENERGY_CHECKS:
+        ev = events.get(event) or {}
+        ev_on = bool(ev.get('enabled')) and ev.get('function', 'NO_FUNC') != 'NO_FUNC'
+        check_cfg = task.get(check)
+        check_on = isinstance(check_cfg, dict) and bool(check_cfg.get('enabled'))
+        if ev_on and not task.get('enabled'):
+            out.append('%s will never fire: System Task is off.' % ev_label)
+        elif ev_on and check_cfg is None:
+            out.append('%s has no %s set in System Task; the service uses its default.' % (ev_label, check_label))
+        elif ev_on and not check_on:
+            out.append('%s will never fire: %s is off in System Task.' % (ev_label, check_label))
+        elif check_on and task.get('enabled') and not ev_on:
+            out.append('%s is on in System Task, but the %s event has no action.' % (check_label, ev_label))
+    return out
+
+
 def user_function_names(config):
     """``{'USER_FUNC1': 'Backup', ...}`` from the config's ``user_function_names`` section."""
     return {k: str(v).strip() for k, v in ((config or {}).get('user_function_names') or {}).items() if str(v).strip()}

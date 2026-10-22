@@ -136,7 +136,12 @@ def _RestoreWakeup():
             log.error('Could not arm wakeup on charge: %s', ret.get('error'))
 
 
+_halting = False
+
+
 def _SystemHalt(event):
+    global _halting
+    _halting = True
     if (event in ('low_charge', 'low_battery_voltage', 'no_power')
         and configData.get('system_task', {}).get('wakeup_on_charge', {}).get('enabled', False)
         and 'trigger_level' in configData['system_task']['wakeup_on_charge']):
@@ -152,7 +157,13 @@ def _SystemHalt(event):
         pass
     subprocess.call(["sudo", "halt"])
 
-def ExecuteFunc(func, event, param):
+def ExecuteFunc(func, event, param, reason=None):
+    if func.startswith('SYS_FUNC'):
+        if _halting and func != 'SYS_FUNC_REBOOT':
+            return  # one halt per run; the 5 s checks keep matching until systemd stops us
+        log.warning('%s: %s -> %s', event, reason or param, func)
+    elif func != 'NO_FUNC':
+        log.info('%s: %s -> %s', event, reason or param, func)
     if func == 'SYS_FUNC_HALT':
         _SystemHalt(event)
     elif func == 'SYS_FUNC_HALT_POW_OFF':
@@ -217,23 +228,45 @@ def _EvalButtonEvents():
         return False
 
 
+# System Task check -> (System Event it fires, default threshold the UIs offer)
+LOW_GUARDS = {'min_charge': ('low_charge', 10), 'min_bat_voltage': ('low_battery_voltage', 3.3)}
+_badThreshold = set()
+
+
+def _Threshold(section):
+    """Configured threshold, or the UI default when missing/invalid (logged once)."""
+    value = configData.get('system_task', {}).get(section, {}).get('threshold')
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        if section not in _badThreshold:
+            _badThreshold.add(section)
+            log.warning('system_task.%s.threshold %r invalid; using %s', section, value, LOW_GUARDS[section][1])
+        return float(LOW_GUARDS[section][1])
+
+
+def _Mains(status):
+    # Only a PRESENT input carries the load. WEAK may not: the battery can still
+    # drain behind a weak charger, so it stays guarded.
+    return status.get('powerInput') == 'PRESENT' or status.get('powerInput5vIo') == 'PRESENT'
+
+
 def _EvalCharge(status):
-    if  ((status['battery'] == 'NOT_PRESENT')
-      or (status['powerInput'] == 'PRESENT')
-      or (status['powerInput5vIo'] == 'PRESENT')):
+    # The charge gauge is only trusted to fall while the battery is not charging:
+    # on a WEAK input with CHARGING_FROM_* it may sit low while energy flows in.
+    # The voltage check below still covers a weak charger losing the race.
+    if status['battery'] != 'NORMAL' or _Mains(status):
         return True
     charge = pijuice.status.GetChargeLevel()
     if charge['error'] == 'NO_ERROR':
         level = float(charge['data'])
         global chargeLevel
-        if ('threshold' in configData['system_task']['min_charge']):
-            th = float(configData['system_task']['min_charge']['threshold'])
-            if level == 0 or ((level < th) and ((chargeLevel-level) >= 0 and (chargeLevel-level) < 3)):
-                global lowChgEn
-                if lowChgEn:
-                    # energy is low, take action
-                    ExecuteFunc(configData['system_events']['low_charge']['function'],
-                                'low_charge', level)
+        th = _Threshold('min_charge')
+        if level == 0 or ((level < th) and ((chargeLevel-level) >= 0 and (chargeLevel-level) < 3)):
+            if lowChgEn:
+                # energy is low, take action
+                ExecuteFunc(configData['system_events']['low_charge']['function'], 'low_charge', level,
+                            'charge %.0f%% below %.0f%% (%s)' % (level, th, status.get('powerInput')))
 
         chargeLevel = level
         return True
@@ -242,23 +275,15 @@ def _EvalCharge(status):
 
 
 def _EvalBatVoltage(status):
-    if  ((status['battery'] == 'NOT_PRESENT')
-      or (status['powerInput'] == 'PRESENT')
-      or (status['powerInput5vIo'] == 'PRESENT')):
+    if status['battery'] == 'NOT_PRESENT' or _Mains(status):
         return True
     bv = pijuice.status.GetBatteryVoltage()
     if bv['error'] == 'NO_ERROR':
         v = float(bv['data']) / 1000
-        try:
-            th = float(configData['system_task'].get('min_bat_voltage', {}).get('threshold'))
-        except ValueError:
-            th = None
-        if th is not None and v < th:
-            global lowBatVolEn
-            if lowBatVolEn:
-                # Battery voltage below thresholdw, take action
-                ExecuteFunc(configData['system_events']['low_battery_voltage']['function'], 'low_battery_voltage', v)
-
+        th = _Threshold('min_bat_voltage')
+        if v < th and lowBatVolEn:
+            ExecuteFunc(configData['system_events']['low_battery_voltage']['function'], 'low_battery_voltage', v,
+                        'battery %.3f V below %.2f V (%s, %s)' % (v, th, status.get('battery'), status.get('powerInput')))
         return True
     else:
         return False
@@ -321,6 +346,24 @@ def _ConfigureWatchdog(state):
     except:
         pass
 
+def _GuardEnabled(section, event_enabled):
+    """Whether the System Task check behind a low-energy event runs.
+
+    An enabled event with no check configured gets the UI default threshold
+    (it used to never fire, silently); a check switched off on purpose is
+    respected but logged, as is System Task itself being off."""
+    task = configData.setdefault('system_task', {})
+    event = LOW_GUARDS[section][0]
+    if event_enabled and not isinstance(task.get(section), dict):
+        task[section] = {'enabled': True, 'threshold': LOW_GUARDS[section][1]}
+        log.warning('%s is enabled but system_task.%s is missing; guarding at %s', event, section, LOW_GUARDS[section][1])
+    enabled = task.get(section, {}).get('enabled', False)
+    off = [name for name, on in (('System Task', task.get('enabled')), ('system_task.' + section, enabled)) if not on]
+    if event_enabled and off:
+        log.warning('%s is enabled but will never fire: %s off', event, ' and '.join(off))
+    return enabled
+
+
 def _LoadConfiguration():
     global pijuice
     global configData
@@ -341,11 +384,11 @@ def _LoadConfiguration():
         configData.update(config_dict)
 
     sysEvEn = 'system_events' in configData
-    minChgEn = configData.get('system_task', {}).get('min_charge', {}).get('enabled', False)
-    minBatVolEn = configData.get('system_task', {}).get('min_bat_voltage', {}).get('enabled', False)
     watchdogEn = configData.get('system_task', {}).get('enabled') and configData.get('system_task', {}).get('watchdog', {}).get('enabled', False)
     lowChgEn = sysEvEn and configData.get('system_events', {}).get('low_charge', {}).get('enabled', False)
     lowBatVolEn = sysEvEn and configData.get('system_events', {}).get('low_battery_voltage', {}).get('enabled', False)
+    minChgEn = _GuardEnabled('min_charge', lowChgEn)
+    minBatVolEn = _GuardEnabled('min_bat_voltage', lowBatVolEn)
     noPowEn = sysEvEn and configData.get('system_events', {}).get('no_power', {}).get('enabled', False)
     PowEn = sysEvEn and configData.get('system_events', {}).get('power', {}).get('enabled', False)
     sysStartEvEn = sysEvEn and configData.get('system_events', {}).get('sys_start', {}).get('enabled', False)

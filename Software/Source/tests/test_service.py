@@ -81,6 +81,19 @@ class ServiceTests(unittest.TestCase):
                 self.service.flash_firmware(str(Path(self.tmp.name, 'x.bin')))
             popen.assert_not_called()  # a bad image never reaches the flasher
 
+    def test_low_energy_warnings_name_the_missing_half(self):
+        from pijuice_service import low_energy_warnings
+        halt = {'enabled': True, 'function': 'SYS_FUNC_HALT_POW_OFF'}
+        both = {'system_task': {'enabled': True, 'min_charge': {'enabled': True}, 'min_bat_voltage': {'enabled': True}},
+                'system_events': {'low_charge': halt, 'low_battery_voltage': halt}}
+        self.assertEqual(low_energy_warnings(both), [])
+        missing = {'system_task': {'enabled': True}, 'system_events': both['system_events']}  # typhon 2026-10-21
+        self.assertIn('default', low_energy_warnings(missing)[0])
+        off = dict(both, system_task={'enabled': False})
+        self.assertEqual(len(low_energy_warnings(off)), 2)
+        no_action = dict(both, system_events={})
+        self.assertIn('no action', low_energy_warnings(no_action)[0])
+
 
 if __name__ == '__main__':
     unittest.main()

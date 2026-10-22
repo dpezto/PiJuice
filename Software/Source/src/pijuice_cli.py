@@ -34,6 +34,7 @@ from pijuice_service import (
     function_description,
     function_label,
     load_config as _service_load_config,
+    low_energy_warnings,
     readable,
     rtc_fields_now,
     schedule_values,
@@ -2134,6 +2135,11 @@ class WakeupAlarmTab(object):
         main_menu()
 
 
+def _low_energy_rows():
+    """Live (draft) warnings when a low-battery shutdown cannot fire."""
+    return [urwid.Text(("warning", "! " + w)) for w in low_energy_warnings(pijuiceConfigData)]
+
+
 class SystemTaskTab(object):
     def __init__(self, *args):
         self.main()
@@ -2365,6 +2371,7 @@ class SystemTaskTab(object):
         periodItem = periodEditItem if self.exthaltenabled else periodTextItem
         periodRow = urwid.Columns([(24, exthaltCheckBox), (34, periodItem)])
         elements.extend([periodRow, urwid.Divider()])
+        elements[1:1] = _low_energy_rows()
 
         ## Footer ##
         elements.extend(
@@ -2531,6 +2538,7 @@ class SystemEventsTab(object):
             )
             elements.append(row)
         elements.append(urwid.Divider())
+        elements[2:2] = _low_energy_rows()
 
         ## Footer ##
         elements.extend(
