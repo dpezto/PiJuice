@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -46,6 +47,8 @@ BUS_DEFAULT = 1
 ADDRESS_DEFAULT = 0x14
 CONFIG_PATH_DEFAULT = '/var/lib/pijuice/pijuice_config.JSON'
 PID_FILE_DEFAULT = '/run/pijuice/pijuice_sys.pid'
+FLASH_TIMEOUT_S = 600   # pijuiceboot; the daemon's SIGUSR1 pause outlasts it
+FLASH_QUIESCE_S = 1.5   # a daemon poll already on the bus finishes in well under this
 
 # ON_OFF_STATUS is firmware-driven; the UIs never offer it.
 LED_USER_SELECTABLE = ['NOT_USED', 'CHARGE_STATUS', 'USER_LED']
@@ -728,7 +731,18 @@ class PiJuiceService(object):
         """Keep the wanted alarm on disk: the HAT forgets it after a full battery
         drain, and the daemon re-arms it from here at start (upstream #1035)."""
         config = load_config(self.config_path)
-        config.setdefault('wakeup_alarm', {}).update(fields)
+        wanted = config.setdefault('wakeup_alarm', {})
+        wanted.update(fields)
+        # The restore needs both halves; one UI action sets only one of them
+        # (a schedule saved while wakeup was already on, or wakeup switched on
+        # for a schedule set elsewhere). Fill the other from the HAT.
+        try:
+            if 'enabled' not in wanted:
+                wanted['enabled'] = bool(self.get_alarm_control().get('alarm_wakeup_enabled'))
+            if wanted['enabled'] and not wanted.get('alarm'):
+                wanted['alarm'] = self.get_alarm()
+        except PiJuiceError:
+            pass  # keep the half we have
         try:
             save_config(config, self.config_path)
             self.config = config
@@ -750,10 +764,11 @@ class PiJuiceService(object):
         if not addr:
             raise PiJuiceError('NO_ADDRESS', 'firmware')
         bus, _addr = self._resolve_bus_addr()
-        signal_service('SIGUSR1', self.pid_file)
+        if signal_service('SIGUSR1', self.pid_file) == 0:
+            time.sleep(FLASH_QUIESCE_S)  # let a daemon iteration already on the bus finish
         try:
             run = subprocess.run(['pijuiceboot', format(addr, 'x'), bin_file, str(bus)],
-                                 capture_output=True, text=True, timeout=600)
+                                 capture_output=True, text=True, timeout=FLASH_TIMEOUT_S)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise PiJuiceError(str(exc), 'pijuiceboot')
         finally:

@@ -97,9 +97,10 @@ _pausedUntil = 0.0
 
 
 def _PausePolling(signum, _frame):
-    """SIGUSR1: stay off the bus for two minutes (firmware flash); SIGUSR2: resume."""
+    """SIGUSR1: stay off the bus for a firmware flash (longer than the flasher's
+    600 s timeout, so it cannot resume mid-flash); SIGUSR2: resume."""
     global _pausedUntil
-    _pausedUntil = time.monotonic() + 120 if signum == signal.SIGUSR1 else 0.0
+    _pausedUntil = time.monotonic() + 660 if signum == signal.SIGUSR1 else 0.0
     log.info('Polling %s', 'paused for a firmware update' if _pausedUntil else 'resumed')
 
 

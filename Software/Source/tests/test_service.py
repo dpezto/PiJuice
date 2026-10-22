@@ -81,6 +81,30 @@ class ServiceTests(unittest.TestCase):
                 self.service.flash_firmware(str(Path(self.tmp.name, 'x.bin')))
             popen.assert_not_called()  # a bad image never reaches the flasher
 
+    def test_flash_waits_for_the_paused_daemon_to_leave_the_bus(self):
+        order = []
+        with patch.object(svc, 'signal_service', side_effect=lambda sig, _pid: order.append(sig) or 0), \
+             patch.object(svc.time, 'sleep', side_effect=lambda s: order.append(('sleep', s))), \
+             patch.object(svc.subprocess, 'run', side_effect=lambda *a, **k: order.append('flash') or
+                          SimpleNamespace(returncode=0, stdout='')) as run:
+            self.service.flash_firmware(str(self.image))
+        self.assertEqual(order, ['SIGUSR1', ('sleep', svc.FLASH_QUIESCE_S), 'flash', 'SIGUSR2'])
+        self.assertEqual(run.call_args.kwargs['timeout'], svc.FLASH_TIMEOUT_S)
+
+    def test_wakeup_restore_record_gets_both_halves(self):
+        rtc = SimpleNamespace(
+            SetAlarm=lambda alarm: {'error': 'NO_ERROR'},
+            SetWakeupEnabled=lambda on: {'error': 'NO_ERROR'},
+            GetControlStatus=lambda: {'error': 'NO_ERROR', 'data': {'alarm_wakeup_enabled': True}},
+            GetAlarm=lambda: {'error': 'NO_ERROR', 'data': {'hour': 6, 'minute': 0}})
+        self.service.pj.rtcAlarm = rtc
+        load = lambda: svc.load_config(self.service.config_path)['wakeup_alarm']
+        self.service.set_alarm({'hour': 7, 'minute': 30})  # wakeup was already on
+        self.assertEqual(load(), {'alarm': {'hour': 7, 'minute': 30}, 'enabled': True})
+        Path(self.service.config_path).unlink()
+        self.service.set_wakeup_enabled(True)               # schedule set elsewhere
+        self.assertEqual(load(), {'enabled': True, 'alarm': {'hour': 6, 'minute': 0}})
+
     def test_low_energy_warnings_name_the_missing_half(self):
         from pijuice_service import low_energy_warnings
         halt = {'enabled': True, 'function': 'SYS_FUNC_HALT_POW_OFF'}
