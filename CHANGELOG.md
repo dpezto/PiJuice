@@ -1,3 +1,55 @@
+## Unreleased
+
+### Software
+pijuice-base; urgency=medium
+
+* src/pijuice_sys.py:
+    - Fix: an enabled Low charge / Low battery voltage event whose System Task
+      check was never configured guards at 10 % / 3.3 V instead of never firing
+      (a Pi died on an empty battery); a check switched off on purpose is
+      respected but logged; a `None` threshold no longer raises `TypeError`
+    - Fix: only a `PRESENT` input skips the checks. On `WEAK` the voltage check
+      stays on and the charge check runs while the battery is not charging
+    - Every system function logs event, value and threshold; a halt fires once
+    - Battery sessions closed on stop with the reason (`halt (<event>)`)
+    - Resource pass (Pi Zero W): one read per value per 5 s tick shared by all
+      consumers, profile cached, safety checks before SD writes, 1 s status
+      poll only for buttons mapped to system/user functions, unchanged
+      power_supply values not rewritten, no UI service import; `Nice=10`.
+      ~1.5 % -> ~0.1 % of a core, RSS 11.6 -> 10.8 MB
+    - Firmware-flash pause outlasts the flasher timeout (660 s)
+
+* pijuice.py:
+    - I2C transfers run inline under a lock, not on a new thread each
+      (~3.3 ms -> ~0.4 ms CPU per transfer on a Pi Zero W)
+
+* pijuice_battery.py:
+    - Per-session discharge log (start/end, charge at both ends, average load,
+      end reason); capacity estimates qualify on any continuous discharge of
+      >= 50 points, compatible with the 80 % charge limit
+    - SD writes on session events, else every 5 min on battery / 30 min on mains
+    - Durable charge-pause marker (directory fsync after the rename)
+
+* src/pijuice_cli.py:
+    - `--status` / `--json`; exits with a hint instead of hanging without a TTY
+    - Low-battery shutdown warnings on System Task / System Events
+    - Fix: failed toggles (charge limit, wakeup, vim keys) really roll back;
+      applying one IO pin keeps the other pin's draft
+
+* pijuice_service.py:
+    - Fix: the wakeup restore record always gets both schedule and enable
+    - Flash waits for the paused daemon to leave the bus
+
+* bin/pijuiceboot32:
+    - Fix: rebuilt natively for ARMv6; the cross build crashed on a Pi Zero
+
+pijuice-gui; urgency=low
+
+* src/pijuice_gtk.py:
+    - Low-battery shutdown warnings on System Task / System Events; battery
+      sessions on the Battery page
+    - Fix: a script-name-only edit exposes Apply
+
 ## Version 1.10
 
 ### Software

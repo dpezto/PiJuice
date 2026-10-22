@@ -247,6 +247,11 @@ Run `pijuice_cli`. The window is sized to its content like `raspi-config`
 (up to 78 columns, never taller than the screen), with colour for focus,
 primary actions, warnings and errors. Set `NO_COLOR=1` for a monochrome display.
 
+The menu needs a terminal (`ssh -t host pijuice_cli`); without one it exits
+with a hint instead of waiting. `pijuice_cli --status` prints battery, power
+input, load, charge limit, recent battery sessions and low-battery warnings;
+`--json` gives the same for scripts.
+
 Keys, the same on every screen (`?` shows this table in the app):
 
 | Action | Keys | With vim keybindings |
@@ -293,8 +298,14 @@ of the System Task switch:
   count as one cycle. Only battery-powered intervals are counted. Gauge jumps,
   missing readings, and time while the service is stopped are excluded. The
   displayed start date distinguishes recorded use from lifetime battery age.
-- **Estimated capacity health** learns from an uninterrupted discharge starting
-  at 80% or above and ending at 20%. It integrates GPIO output voltage/current,
+- **Battery sessions** record every stretch on battery: when it started and
+  ended, charge at both ends, average battery-side load and why it ended
+  (`power`, `no battery`, `halt (<event>)`, `service stopped`, `interrupted`
+  when the readings simply stopped, e.g. a brown-out). The last three are shown
+  on the battery page and by `pijuice_cli --status`; twenty are kept.
+- **Estimated capacity health** learns from any uninterrupted discharge of at
+  least 50 points (e.g. 75% to 25%, so it works with the 80% charge limit),
+  judged when the discharge ends. It integrates GPIO output voltage/current,
   converts output energy to battery charge using battery voltage and an assumed
   90% converter efficiency, then extrapolates over the observed charge range.
   Health is that estimated full capacity divided by the configured capacity.
@@ -306,9 +317,10 @@ of the System Task switch:
   a laboratory capacity measurement. No health percentage is shown before a
   qualifying session; the UI displays learning progress and the last estimate
   date. Tracking never forces discharge or changes the charge limit.
-- History is saved atomically once a minute and at graceful shutdown in
-  `/var/lib/pijuice/battery_history.json`. Abrupt power loss can lose up to one
-  minute of observations. Restarting breaks the capacity-learning session but
+- History is saved atomically in `/var/lib/pijuice/battery_history.json` when a
+  session starts or ends, on a new estimate and at graceful shutdown; otherwise
+  every 5 minutes on battery and 30 on mains, to spare the SD card. Abrupt power
+  loss can lose up to five minutes of observations. Restarting breaks the capacity-learning session but
   preserves cycle totals and completed estimates. Gaps over 30 seconds do too.
 - Use **New battery / reset tracking…** after replacing a battery, including one
   of the same model. Changing profile automatically starts a new series. The last
@@ -428,6 +440,8 @@ This is the system events menu tab. It allows you to trigger events for certain 
 
 * **Low charge**. System task monitors charge level and generates this event when charge drops below configurable threshold as set in "System Task"
 * **Low battery voltage**. This event is generated when battery voltage drops below configurable threshold as set in "System Task"
+
+  Both need System Task enabled and their check ("Minimum charge" / "Minimum battery voltage") on; the System Task and System Events pages warn when one half is missing. If the event is on and its check was never configured, the service guards at 10% / 3.3 V and logs it. Only a `PRESENT` input pauses them: on a `WEAK` input the voltage check stays active, and the charge check runs while the battery is not charging. Every shutdown is logged with its event, value and threshold (`journalctl -u pijuice`).
 * **No power**. System task generates this event when power source disappears and system is powered only with energy from battery.
 * **Watchdog reset**. If watchdog reset happened for some reason PiJuice raises watchdog reset fault flag that system task can detect immediately after boot.
 * **Button power off**. This event is raised after boot if there was power off triggered by button press.
@@ -951,6 +965,8 @@ This is the system events menu. It allows you to trigger events for certain scen
 
 * **Low charge**. System task monitors charge level and generates this event when charge drops below configurable threshold as set in "System Task"
 * **Low battery voltage**. This event is generated when battery voltage drops below configurable threshold as set in "System Task"
+
+  Both need System Task enabled and their check ("Minimum charge" / "Minimum battery voltage") on; the System Task and System Events pages warn when one half is missing. If the event is on and its check was never configured, the service guards at 10% / 3.3 V and logs it. Only a `PRESENT` input pauses them: on a `WEAK` input the voltage check stays active, and the charge check runs while the battery is not charging. Every shutdown is logged with its event, value and threshold (`journalctl -u pijuice`).
 * **No power**. System task generates this event when power source disappears and system is powered only with energy from battery.
 * **Watchdog reset**. If watchdog reset happened for some reason PiJuice raises watchdog reset fault flag that system task can detect immediately after boot.
 * **Button power off**. This event is raised after boot if there was power off triggered by button press.
