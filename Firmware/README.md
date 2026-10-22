@@ -26,6 +26,22 @@ pijuiceboot 14 PiJuice-Vx.y_YYYY_MM_DD.elf.binary
 The firmware source code is available in this directory but it requires deep understanding of the hardware design and the programming involved if you wanted to customise it. Making changes to the firmware may even harm components or damage the battery.
 The majority of customisation can anyway be done by using the I2C command interface provided through the Python API that is installed together with configuration GUI. This is the best approach for end users wishing to customise further PiJuice for their needs.
 
+## Building the firmware
+
+The fork builds `Source/` with `arm-none-eabi-gcc` (Debian/Raspberry Pi OS:
+`apt install gcc-arm-none-eabi libnewlib-arm-none-eabi`), no STM32CubeIDE:
+
+```bash
+cd Source
+make            # build/PiJuice.elf, .bin, .hex, .map
+make test       # host-side checks of hardware-free logic
+make release    # ../PiJuice-V<version>_<date>.elf.binary from Inc/version.h
+```
+
+Versions are semver (`Inc/version.h`, tags `fw-vX.Y.Z`). Firmware 1.7.0 and
+later report the full version through command `0xFC`; `0xFD` keeps the
+original `major.minor` byte for older hosts.
+
 ## PiJuice bricked after unsucsessful firmware update
 
 To recover from this issue follow these steps:

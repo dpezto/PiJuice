@@ -100,3 +100,19 @@ V1.6
     V1.6_2021_09_10
     - Fixed instant watchdog wakeup trigger after restore.
     - Fixed missing wakeup restore enable on power on when power source is present and no battery, issue #760.
+
+V1.7 (fork: github.com/dpezto/PiJuice; semver from here on, tags fw-vX.Y.Z)
+    V1.7.0
+    - Version reported as semver through new command 0xFC [schema, major, minor, patch, variant];
+      0xFD unchanged (major << 4 | minor). Image names PiJuice-Vx.y.z_YYYY_MM_DD.
+    - Fuel gauge APA set from the battery profile capacity (LC709203F datasheet Table 7) instead
+      of the 3000 mAh value for every profile; gauge CRC errors are counted; battery current from
+      RSOC steps was half the real value; MCU estimator int32 overflow fixed.
+    - Delayed power-off is wrap-safe again (V1.6 regression near the 49.7-day tick wrap).
+    - RTC emulation bounds raw writes to its 64 registers.
+    - Charger: a failed register write no longer skips the charge enable/disable decision.
+    - Board fault status reports the charger fault code and the TS fault correctly.
+    - Code no longer links into the EEPROM emulation's erase range; unchanged NV values are not
+      rewritten; ISR flags volatile; RTC alarm flag cleared before evaluation; LED PWM stops in
+      low power.
+    - Builds with arm-none-eabi-gcc via Source/Makefile (make, make test, make release).
