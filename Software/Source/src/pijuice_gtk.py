@@ -22,7 +22,6 @@ Run on the device:  python3 pijuice_gtk.py   (--selftest builds the window and e
 import copy
 import datetime
 import os
-import re
 import sys
 import time
 
@@ -43,7 +42,8 @@ from pijuice_service import (  # noqa: E402
     function_description,
     function_label,
     low_energy_warnings,
-    pack_version,
+    latest_firmware,
+    version_tuple,
     readable,
     user_function_names,
     schedule_values,
@@ -1467,7 +1467,6 @@ class FirmwareView(_View):
     title = "Firmware"
     slug = "firmware"
     FW_DIR = "/usr/share/pijuice/data/firmware/"
-    _RE = re.compile(r"PiJuice-V(\d+)\.(\d+)_(\d+_\d+_\d+)\.elf\.binary")
 
     def __init__(self, service):
         super().__init__(service)
@@ -1513,22 +1512,7 @@ class FirmwareView(_View):
         self.refresh()
 
     def _scan_file(self):
-        best = 0
-        self._bin_file = None
-        self._new_ver = None
-        try:
-            files = sorted(os.listdir(self.FW_DIR))
-        except OSError:
-            files = []
-        for name in files:
-            m = self._RE.match(name)
-            if not m:
-                continue
-            ver = pack_version("%s.%s" % m.group(1, 2))
-            if ver >= best:
-                best = ver
-                self._new_ver = "%d.%d" % (int(m.group(1)), int(m.group(2)))
-                self._bin_file = os.path.join(self.FW_DIR, name)
+        self._new_ver, self._bin_file = latest_firmware(self.FW_DIR)
         self._path.set_text(os.path.basename(self._bin_file) if self._bin_file else "No firmware file found")
         self._path.set_tooltip_text(self._bin_file)
 
@@ -1542,11 +1526,11 @@ class FirmwareView(_View):
         self._update_btn.set_sensitive(False)
         cur = (fw or {}).get("version") if isinstance(fw, dict) else None
         self._ver.set_text(cur or "unknown")
-        cur_int, new_int = pack_version(cur), pack_version(self._new_ver)
-        if cur_int and new_int > cur_int:
+        cur_int, new_int = version_tuple(cur), version_tuple(self._new_ver)
+        if any(cur_int) and new_int > cur_int:
             self._fw_status.set_text("New firmware V%s available." % self._new_ver)
             self._update_btn.set_sensitive(True)
-        elif cur_int and new_int:
+        elif any(cur_int) and any(new_int):
             self._fw_status.set_text("Firmware is up to date.")
         else:
             self._fw_status.set_text("No applicable update found.")

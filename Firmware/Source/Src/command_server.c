@@ -22,6 +22,7 @@
 #include "io_control.h"
 #include "execution.h"
 #include "logging.h"
+#include "version.h"
 
 #define REGISTERS_NUM	((uint16_t)256)
 
@@ -41,7 +42,7 @@ extern uint8_t powerOffBtnEventFlag;
 
 extern void Error_Handler(void);
 
-const uint8_t firmwareVer = 0x16;
+const uint8_t firmwareVer = (FIRMWARE_VERSION_MAJOR << 4) | FIRMWARE_VERSION_MINOR;
 const uint8_t firmwareVariant = 0x00;
 
 typedef  void (*pFunction)(void);
@@ -95,6 +96,7 @@ void CmdServerReadWriteTestAndCalibration(uint8_t dir, uint8_t *pData, uint16_t 
 void CmdServerRunBootloader(uint8_t dir, uint8_t *pData, uint16_t *dataLen);
 void CmdServerReadWriteDefaultConfiguration(uint8_t dir, uint8_t *pData, uint16_t *dataLen);
 void CmdServerReadFirmwareVersion(uint8_t dir, uint8_t *pData, uint16_t *dataLen);
+void CmdServerReadFirmwareVersionExt(uint8_t dir, uint8_t *pData, uint16_t *dataLen);
 void CmdServerReadBoardFaultStatus(uint8_t dir, uint8_t *pData, uint16_t *dataLen);
 void CmdServerReadWriteIoConfig1(uint8_t dir, uint8_t *pData, uint16_t *dataLen);
 void CmdServerReadWriteIoConfig2(uint8_t dir, uint8_t *pData, uint16_t *dataLen);
@@ -391,7 +393,7 @@ MasterCommand_T masterCommands[REGISTERS_NUM] =
 /*249*/	NULL,
 /*250*/	CmdServerReadBoardFaultStatus,
 /*251*/	NULL,
-/*252*/	NULL,
+/*252*/	CmdServerReadFirmwareVersionExt, // semver, see version.h
 /*253*/	CmdServerReadFirmwareVersion,
 /*254*/	CmdServerRunBootloader,
 /*255*/	NULL,
@@ -1090,6 +1092,17 @@ void CmdServerReadFirmwareVersion(uint8_t dir, uint8_t *pData, uint16_t *dataLen
 		pData[0] = firmwareVer;
 		pData[1] = firmwareVariant;
 		*dataLen = 2;
+	}
+}
+
+void CmdServerReadFirmwareVersionExt(uint8_t dir, uint8_t *pData, uint16_t *dataLen) {
+	if (dir == MASTER_CMD_DIR_READ) {
+		pData[0] = FIRMWARE_VERSION_SCHEMA;
+		pData[1] = FIRMWARE_VERSION_MAJOR;
+		pData[2] = FIRMWARE_VERSION_MINOR;
+		pData[3] = FIRMWARE_VERSION_PATCH;
+		pData[4] = firmwareVariant;
+		*dataLen = 5;
 	}
 }
 

@@ -75,7 +75,7 @@ FIRMWARE_HINTS = {
 }
 
 
-FIRMWARE_FILE_RE = re.compile(r'PiJuice-V(\d+)\.(\d+)_(\d+_\d+_\d+)\.elf\.binary$')
+FIRMWARE_FILE_RE = re.compile(r'PiJuice-V(\d+\.\d+(?:\.\d+)?)_(\d+_\d+_\d+)\.elf\.binary$')
 # Every released image (V1.0 .. V1.6) is 60-90 KB; the MCU flash is 128 KB.
 FIRMWARE_SIZE_RANGE = (32 * 1024, 128 * 1024)
 
@@ -92,7 +92,7 @@ def firmware_error(returncode):
 def check_firmware_file(path):
     """Refuse an image the flasher would happily brick the HAT with."""
     if not FIRMWARE_FILE_RE.search(os.path.basename(path)):
-        raise PiJuiceError('Not a PiJuice firmware file name (PiJuice-Vx.y_YYYY_MM_DD.elf.binary)', 'firmware')
+        raise PiJuiceError('Not a PiJuice firmware file name (PiJuice-Vx.y.z_YYYY_MM_DD.elf.binary)', 'firmware')
     try:
         size = os.path.getsize(path)
     except OSError as exc:
@@ -101,17 +101,36 @@ def check_firmware_file(path):
         raise PiJuiceError('Image is %d bytes; a PiJuice image is 32-128 KB. Download it again.' % size, 'firmware')
 
 
-def pack_version(text):
-    """``'1.6'`` -> ``0x16`` (the int the library's profile selector wants); 0 if unparsable."""
+def version_tuple(text):
+    """``'1.7.0'`` -> ``(1, 7, 0)``; ``'1.6'`` (pre-semver firmware) -> ``(1, 6, 0)``;
+    ``(0, 0, 0)`` if unparsable. Compare firmware versions with this."""
     try:
-        major, minor = str(text).split('.')
-        return (int(major) << 4) + int(minor)
+        parts = [int(p) for p in str(text).split('.')]
     except (TypeError, ValueError):
-        return 0
+        return (0, 0, 0)
+    return tuple(parts + [0, 0])[:3] if 2 <= len(parts) <= 3 else (0, 0, 0)
 
 
-def version_to_str(number):
-    return '{}.{}'.format(number >> 4, number & 15)
+def pack_version(text):
+    """``'1.6'`` / ``'1.7.0'`` -> ``0x16`` / ``0x17``: major.minor in the nibble
+    form the library's feature checks and profile selector use; 0 if unparsable."""
+    major, minor, _patch = version_tuple(text)
+    return (major << 4) + minor if major < 16 and minor < 16 else 0
+
+
+def latest_firmware(directory):
+    """``(version_text, path)`` of the newest ``PiJuice-V*.elf.binary`` in
+    *directory*, or ``(None, None)``. Accepts ``Vx.y`` and semver ``Vx.y.z``."""
+    best = (None, None)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return best
+    for name in names:
+        m = FIRMWARE_FILE_RE.match(name)
+        if m and (best[0] is None or version_tuple(m.group(1)) >= version_tuple(best[0])):
+            best = (m.group(1), os.path.join(directory, name))
+    return best
 
 
 # Button / system-event functions: label and what actually happens. The HARD

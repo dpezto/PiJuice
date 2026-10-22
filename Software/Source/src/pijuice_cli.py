@@ -6,7 +6,6 @@
 import copy
 import datetime
 import fcntl
-import glob
 import json
 import os
 import re
@@ -41,7 +40,8 @@ from pijuice_service import (
     schedule_values,
     user_function_names,
     validate_number,
-    version_to_str,
+    latest_firmware,
+    version_tuple,
 )
 
 class ActionButton(urwid.Button):
@@ -312,37 +312,14 @@ class FirmwareTab(object):
         self.firmware_path = None
         self.show_firmware()
 
-    def check_for_fw_updates(self):
-        # Check /usr/share/pijuice/data/firmware/ for new version of firmware.
-        # Returns (version, path)
-        bin_dir = "/usr/share/pijuice/data/firmware/"
-        latest_version = 0
-        firmware_path = ""
-
-        regex = re.compile(r"PiJuice-V(\d+)\.(\d+)_(\d+_\d+_\d+).elf.binary")
-        for path in sorted(glob.glob(os.path.join(bin_dir, "PiJuice-V*.elf.binary"))):
-            match = regex.match(os.path.basename(path))
-            if match:
-                major = int(match.group(1))
-                minor = int(match.group(2))
-                version = (major << 4) + minor
-                if version >= latest_version:
-                    latest_version = version
-                    firmware_path = path
-
-        return latest_version, firmware_path
-
     def get_fw_status(self):
-        current_version = _fw()
-        latest_version, firmware_path = self.check_for_fw_updates()
+        # Versions are text ("1.6", "1.7.0") compared as semver tuples.
+        current_version = (service.firmware_version or {}).get("version") if service is not None else None
+        latest_version, firmware_path = latest_firmware("/usr/share/pijuice/data/firmware/")
 
         if current_version and latest_version:
-            if latest_version > current_version:
-                firmware_status = (
-                    "New firmware (V"
-                    + version_to_str(latest_version)
-                    + ") is available"
-                )
+            if version_tuple(latest_version) > version_tuple(current_version):
+                firmware_status = "New firmware (V" + latest_version + ") is available"
             else:
                 firmware_status = "up to date"
         elif not current_version:
@@ -397,7 +374,7 @@ class FirmwareTab(object):
                 time.sleep(0.5)
                 if service.connect():
                     break
-            message = ("Firmware update successful: V" + version_to_str(_fw()) if service.available else
+            message = ("Firmware update successful: V" + (service.firmware_version or {}).get("version", "?") if service.available else
                        "Firmware written, but the device has not reconnected yet. Check power and reopen this section.")
 
         confirmation_dialog(message, single_option=True, next=self.show_firmware)
@@ -407,9 +384,9 @@ class FirmwareTab(object):
             self.get_fw_status()
         )
         current_version_txt = urwid.Text(
-            "Current version: " + version_to_str(current_version)
+            "Current version: " + (current_version or "unknown")
         )
-        firmware_path_txt = urwid.Text("Path: " + str(firmware_path))
+        firmware_path_txt = urwid.Text("Path: " + str(firmware_path or ""))
         status_txt = urwid.Text("Status: " + firmware_status)
         elements = [
             urwid.Text(("title", "Firmware")),
@@ -419,7 +396,7 @@ class FirmwareTab(object):
             firmware_path_txt,
             urwid.Divider(),
         ]
-        if latest_version > current_version:
+        if current_version and latest_version and version_tuple(latest_version) > version_tuple(current_version):
             self.firmware_path = firmware_path
             elements.extend(
                 [

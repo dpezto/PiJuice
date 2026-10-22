@@ -3,6 +3,7 @@ import sys
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -36,6 +37,27 @@ class TransferTests(unittest.TestCase):
         self.interface.i2cbus.read_i2c_block_data = lambda *_a: (_ for _ in ()).throw(OSError(121, 'Remote I/O'))
         self.assertEqual(self.interface.ReadData(0x40, 1)['error'], 'COMMUNICATION_ERROR')
         self.assertFalse(self.interface._lock.locked())
+
+
+class FirmwareVersionTests(unittest.TestCase):
+    def config(self, replies):
+        interface = SimpleNamespace(ReadData=lambda cmd, length: replies[cmd])
+        return pijuice.PiJuiceConfig(interface)
+
+    def test_semver_firmware_reports_patch(self):
+        ok = lambda data: {'error': 'NO_ERROR', 'data': data}
+        cfg = self.config({0xFD: ok([0x17, 0]), 0xFC: ok([1, 1, 7, 0, 0])})
+        self.assertEqual(cfg.GetFirmwareVersion()['data'], {'version': '1.7.0', 'variant': '0'})
+
+    def test_old_firmware_falls_back_to_major_minor(self):
+        ok = lambda data: {'error': 'NO_ERROR', 'data': data}
+        self.assertEqual(self.config({0xFD: ok([0x16, 0]), 0xFC: {'error': 'DATA_CORRUPTED'}})
+                         .GetFirmwareVersion()['data']['version'], '1.6')
+        # a reply that passes the checksum but is not ours (schema, or 0xFD mismatch)
+        self.assertEqual(self.config({0xFD: ok([0x16, 0]), 0xFC: ok([0, 0, 0, 0, 0])})
+                         .GetFirmwareVersion()['data']['version'], '1.6')
+        self.assertEqual(self.config({0xFD: ok([0x16, 0]), 0xFC: ok([1, 1, 7, 0, 0])})
+                         .GetFirmwareVersion()['data']['version'], '1.6')
 
 
 if __name__ == '__main__':

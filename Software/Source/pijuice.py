@@ -995,6 +995,7 @@ class PiJuiceConfig(object):
     ID_EEPROM_ADDRESS_CMD = 0x7F
     RESET_TO_DEFAULT_CMD = 0xF0
     FIRMWARE_VERSION_CMD = 0xFD
+    FIRMWARE_VERSION_EXT_CMD = 0xFC  # firmware >= 1.7.0: [schema, major, minor, patch, variant]
 
     def __init__(self, interface):
         self.interface = interface
@@ -1534,17 +1535,24 @@ class PiJuiceConfig(object):
         return self.interface.WriteData(self.RESET_TO_DEFAULT_CMD, [0xaa, 0x55, 0x0a, 0xa3])
 
     def GetFirmwareVersion(self):
+        """``'1.7.0'`` from firmware that reports semver (command 0xFC), else
+        ``'1.6'`` from the packed byte every firmware answers (0xFD)."""
         ret = self.interface.ReadData(self.FIRMWARE_VERSION_CMD, 2)
         if ret['error'] != 'NO_ERROR':
             return ret
-        else:
-            major_version = ret['data'][0] >> 4
-            minor_version = (ret['data'][0] << 4 & 0xf0) >> 4
-            version_str = '%i.%i' % (major_version, minor_version)
-            return {'data': {
-                'version': version_str,
-                'variant': format(ret['data'][1], 'x')},
-                'error': 'NO_ERROR'}
+        major_version = ret['data'][0] >> 4
+        minor_version = ret['data'][0] & 0x0f
+        version_str = '%i.%i' % (major_version, minor_version)
+        # Older firmware answers 0xFC with one unchecksummed byte, so the read
+        # fails; the schema byte and the match with 0xFD guard against the rest.
+        ext = self.interface.ReadData(self.FIRMWARE_VERSION_EXT_CMD, 5)
+        if (ext['error'] == 'NO_ERROR' and ext['data'][0] == 1
+                and ext['data'][1:3] == [major_version, minor_version]):
+            version_str = '%i.%i.%i' % tuple(ext['data'][1:4])
+        return {'data': {
+            'version': version_str,
+            'variant': format(ret['data'][1], 'x')},
+            'error': 'NO_ERROR'}
 
     def RunTestCalibration(self):
         self.interface.WriteData(248, [0x55, 0x26, 0xa0, 0x2b])

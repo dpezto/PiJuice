@@ -105,6 +105,26 @@ class ServiceTests(unittest.TestCase):
         self.service.set_wakeup_enabled(True)               # schedule set elsewhere
         self.assertEqual(load(), {'enabled': True, 'alarm': {'hour': 6, 'minute': 0}})
 
+    def test_semver_and_legacy_firmware_versions_compare(self):
+        from pijuice_service import latest_firmware, pack_version, version_tuple
+        self.assertEqual(version_tuple('1.7.0'), (1, 7, 0))
+        self.assertEqual(version_tuple('1.6'), (1, 6, 0))
+        self.assertEqual(version_tuple(None), (0, 0, 0))
+        self.assertGreater(version_tuple('1.7.0'), version_tuple('1.6'))
+        self.assertGreater(version_tuple('1.10.0'), version_tuple('1.9.2'))  # not a string compare
+        self.assertEqual((pack_version('1.6'), pack_version('1.7.0')), (0x16, 0x17))  # feature checks
+        fw_dir = Path(self.tmp.name, 'firmware')
+        fw_dir.mkdir()
+        for name in ('PiJuice-V1.6_2021_09_10.elf.binary', 'PiJuice-V1.7.0_2026_10_21.elf.binary', 'notes.txt'):
+            Path(fw_dir, name).write_bytes(b'')
+        self.assertEqual(latest_firmware(str(fw_dir)),
+                         ('1.7.0', str(Path(fw_dir, 'PiJuice-V1.7.0_2026_10_21.elf.binary'))))
+        self.assertEqual(latest_firmware(str(Path(self.tmp.name, 'missing'))), (None, None))
+        check_firmware_file(str(self.image))  # the legacy x.y name still passes
+        semver = Path(self.tmp.name, 'PiJuice-V1.7.0_2026_10_21.elf.binary')
+        semver.write_bytes(b'\xff' * 80000)
+        check_firmware_file(str(semver))
+
     def test_low_energy_warnings_name_the_missing_half(self):
         from pijuice_service import low_energy_warnings
         halt = {'enabled': True, 'function': 'SYS_FUNC_HALT_POW_OFF'}
