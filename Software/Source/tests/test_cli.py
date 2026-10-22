@@ -543,6 +543,8 @@ class NonInteractiveTests(unittest.TestCase):
         self.assertIn('pause 80%, resume 75%', text)
         self.assertIn('! Low charge will never fire', text)
         self.assertEqual(json.loads(json.dumps(report, default=str))['io_current_ma'], 1465)
+        report['status']['powerInput'] = 'PRESENT'  # typhon: paused at the 80% limit
+        self.assertIn('41% · 3790 mV · Not charging', cli.status_text(report))
 
 
 if __name__ == '__main__': unittest.main()

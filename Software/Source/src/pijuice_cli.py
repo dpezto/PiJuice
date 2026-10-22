@@ -3853,9 +3853,14 @@ def status_report(svc):
 def status_text(report):
     status, policy = report.get("status") or {}, report.get("policy") or {}
     value = lambda key, fmt: fmt % report[key] if report.get(key) is not None else "?"
+    battery = status.get("battery", "UNKNOWN")
+    if battery == "NORMAL" and "PRESENT" in (status.get("powerInput"), status.get("powerInput5vIo")):
+        state = "Not charging"  # e.g. paused at the charge limit; "On battery" would mislead
+    else:
+        state = readable(battery)
     lines = [
         "Battery: %s · %s · %s · %s" % (value("charge", "%s%%"), value("voltage", "%s mV"),
-                                         readable(status.get("battery", "UNKNOWN")), value("temperature", "%s °C")),
+                                         state, value("temperature", "%s °C")),
         "Power input: %s · 5V GPIO: %s · load %s at %s" % (
             readable(status.get("powerInput", "UNKNOWN")), readable(status.get("powerInput5vIo", "UNKNOWN")),
             value("io_current_ma", "%s mA"), value("io_voltage_mv", "%s mV")),
