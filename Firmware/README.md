@@ -9,12 +9,14 @@ pijuiceboot i2c_address path_to_firmware_binary [i2c_bus] [bootloader_address]
 `i2c_bus` defaults to 1, `bootloader_address` to 41 (hex). The binaries in
 `Software/Source/bin/` are built from `pijuiceboot.c` with:
 ```bash
-gcc -O2 -o pijuiceboot64 pijuiceboot.c
-arm-linux-gnueabihf-gcc -O2 -marm -march=armv6 -mfpu=vfp -mfloat-abi=hard -o pijuiceboot32 pijuiceboot.c
+gcc -O2 -o pijuiceboot64 pijuiceboot.c   # on 64-bit Pi OS
+gcc -O2 -o pijuiceboot32 pijuiceboot.c   # natively on 32-bit Pi OS (Raspbian armhf)
 ```
-The 32-bit build is cross-compiled on Debian (its startup objects tag the file
-ARMv7) but contains no ARMv7-only instructions and links only `libc.so.6`, so
-it runs on a Pi Zero. Rebuild natively on a 32-bit Pi OS if in doubt.
+Build `pijuiceboot32` on Raspbian itself: its toolchain defaults to ARMv6 +
+VFP. A Debian `arm-linux-gnueabihf` cross build links Thumb-2 startup code
+(`_start`) even with `-march=armv6`, and crashes on a Pi Zero / Zero W / 1
+before `main`. Check with `readelf -A pijuiceboot32` (`Tag_CPU_arch: v6`,
+`Tag_THUMB_ISA_use: Thumb-1`). Both binaries need glibc >= 2.34.
 
 ### Example:
 ```bash
