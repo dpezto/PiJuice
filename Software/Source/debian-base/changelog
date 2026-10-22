@@ -1,3 +1,24 @@
+pijuice-base (1.11) unstable; urgency=medium
+
+  * pijuice_sys: an enabled low-charge/low-voltage event with no System Task
+    check guards at 10 % / 3.3 V instead of never firing; a WEAK input keeps
+    the voltage check (charge check while not charging); every shutdown is
+    logged with event, value and threshold, and fires once.
+  * Battery history: per-session discharge log (start/end, charge, average
+    load, end reason); capacity estimates qualify on any >= 50-point
+    discharge, compatible with the 80 % charge limit; far fewer SD writes;
+    durable charge-pause marker.
+  * pijuice_cli: --status / --json; exits instead of hanging without a TTY;
+    low-battery warnings; failed toggles roll back; per-pin IO apply keeps
+    the other pin's draft.
+  * Resource pass for the Pi Zero W: inline I2C transfers (no thread per
+    transfer), one read per value per tick, profile cached, power_supply
+    writes only on change, Nice=10. ~1.5 % -> ~0.1 % of a core.
+  * Wakeup restore record complete; firmware flash waits for the paused
+    daemon; pijuiceboot32 rebuilt natively for ARMv6 (crashed on a Pi Zero).
+
+ -- Dai López <dpezto@gmail.com>  Wed, 21 Oct 2026 22:12:54 -0600
+
 pijuice-base (1.10) unstable; urgency=low
 
   * pijuice_cli: all HAT access through pijuice_service; a changed I2C address
