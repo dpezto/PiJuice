@@ -62,7 +62,10 @@ _Min_Stack_Size = 0x400 ;	/* required amount of stack */
 MEMORY
 {
   RAM	(xrw)	: ORIGIN = 0x20000000,	LENGTH = 32K
-  FLASH	(rx)	: ORIGIN = 0x8000000,	LENGTH = 256K
+  /* Code ends below the EEPROM emulation (Inc/eeprom.h): its two 1 KB logical
+     pages at 0x0803BC00 erase 2 KB physical pages, 0x0803B800-0x0803C7FF, so
+     nothing linked from 0x0803B800 up survives a page transfer. */
+  FLASH	(rx)	: ORIGIN = 0x8000000,	LENGTH = 0x3B800
 }
 
 /* Sections */

@@ -444,6 +444,14 @@ uint16_t EE_ReadVariable(uint16_t VirtAddress, uint16_t* Data)
 uint16_t EE_WriteVariable(uint16_t VirtAddress, uint16_t Data)
 {
   uint16_t Status = 0;
+  uint16_t Current;
+
+  /* An unchanged value costs a record (~255 per page) and, eventually, a page
+     erase: skip it. EE_ReadVariable returns 0 when the variable exists. */
+  if (EE_ReadVariable(VirtAddress, &Current) == 0 && Current == Data)
+  {
+    return HAL_OK;
+  }
 
   /* Write the variable virtual address and value in the EEPROM */
   Status = EE_VerifyPageFullWriteVariable(VirtAddress, Data);

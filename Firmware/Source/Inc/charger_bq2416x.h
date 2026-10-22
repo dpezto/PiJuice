@@ -76,7 +76,7 @@ extern ChargerStatus_T chargerStatus;
 extern uint8_t chargerNeedPoll;
 extern ChargerUSBInLockoutStatus_T usbInLockoutStatus;
 extern uint8_t chargerI2cErrorCounter;
-extern uint8_t chargerInterruptFlag;
+extern volatile uint8_t chargerInterruptFlag;
 
 void ChargerInit();
 #if !defined(RTOS_FREERTOS)

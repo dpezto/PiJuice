@@ -77,7 +77,7 @@ int16_t chargerSetProfileDataReq = 0;
 ChargerStatus_T chargerStatus = CHG_NA;
 //static volatile ChargerFaultStatus_T faultStatus = CHG_FAULT_UNKNOWN;
 
-uint8_t chargerInterruptFlag = 0;
+volatile uint8_t chargerInterruptFlag = 0;
 
 //#define CHARGER_I2C_REG_WRITE_TIMEOUT_US	300
 //#define CHARGER_I2C_REG_READ_TIMEOUT_US	500

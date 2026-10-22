@@ -29,7 +29,7 @@ static const uint8_t binHour24ToBcdAmPm[24] = {0x12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 
 static uint8_t weekDaysSelection __attribute__((section("no_init")));
 static uint32_t hoursSelection __attribute__((section("no_init")));
 static uint8_t minutesStep __attribute__((section("no_init")));
-uint8_t alarmEventFlag __attribute__((section("no_init")));
+volatile uint8_t alarmEventFlag __attribute__((section("no_init")));
 
 extern uint8_t resetStatus;
 

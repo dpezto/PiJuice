@@ -91,7 +91,7 @@ uint8_t resetStatus = 0;
 /* Buffer used for I2C transfer */
   //uint8_t i2cTrfBuffer[256];
 
-static uint8_t commandReceivedFlag = 0;
+static volatile uint8_t commandReceivedFlag = 0; // set in I2C ISR callbacks
 
 PowerState_T state = STATE_INIT;
 
@@ -102,7 +102,7 @@ uint32_t lastHostCommandTimer __attribute__((section("no_init")));
 uint8_t i2cErrorCounter = 0;
 
 extern uint32_t lastWakeupTimer;
-extern uint8_t alarmEventFlag;
+extern volatile uint8_t alarmEventFlag;
 
 /* USER CODE END PV */
 
@@ -197,7 +197,7 @@ void ButtonDualLongPressEventCb(void) {
 	}
 }
 
-uint8_t extiFlag = 0;
+volatile uint8_t extiFlag = 0;
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
   if (GPIO_Pin == GPIO_PIN_0)
   {
@@ -752,9 +752,10 @@ int main(void)
 		BatteryTask();
 		PowerSourceTask();
 		if (alarmEventFlag || __HAL_RTC_ALARM_GET_FLAG(&hrtc, RTC_FLAG_ALRAF) != RESET) {
-			EvaluateAlarm();
+			// Clear first: an alarm raised while evaluating is kept for the next pass.
 			alarmEventFlag = 0;
 			__HAL_RTC_ALARM_CLEAR_FLAG(&hrtc, RTC_FLAG_ALRAF);
+			EvaluateAlarm();
 		}
 		LedTask();
 		//if (MS_TIME_COUNT(mainPollMsCounter) > 98) {

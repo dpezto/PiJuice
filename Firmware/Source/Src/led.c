@@ -356,7 +356,8 @@ void LedFunctionSetRGB(LedFunction_T func, uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void LedStop(void) {
-	if ((htim3.Instance->CR1 & TIM_CR1_CEN) == 0) {
+	// Stop the PWM before low power if it runs (the test was inverted, so it never stopped).
+	if ((htim3.Instance->CR1 & TIM_CR1_CEN) != 0) {
 		HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
 		HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_2);
 		HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
@@ -376,7 +377,7 @@ void LedStop(void) {
 }
 
 void LedStart(void) {
-	if ((htim3.Instance->CR1 & TIM_CR1_CEN) == TIM_CR1_CEN)
+	if ((htim3.Instance->CR1 & TIM_CR1_CEN) == 0)
 		//Configure GPIOB PWM pins
 		/*GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_4|GPIO_PIN_5;
 		GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
