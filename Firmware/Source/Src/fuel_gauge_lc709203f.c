@@ -79,7 +79,7 @@ int8_t FuelGaugeReadWord(uint8_t cmd, uint16_t *word) {
 	/*HAL_Delay(2);
 	HAL_I2C_Mem_Read_IT(&hi2c2, 0x16, cmd, 1, readData+3, 3);
 	uint32_t timeout = HAL_GetTick() + 2;
-	while (HAL_I2C_GetState(&hi2c2) != HAL_I2C_STATE_READY && timeout > HAL_GetTick());
+	while (HAL_I2C_GetState(&hi2c2) != HAL_I2C_STATE_READY && !MS_TIME_REACHED(timeout));
 	HAL_Delay(2);*/
 	if (Crc8Block(0, readData, 5) == readData[5]) {
 		*word = (((uint16_t)readData[4])<<8) | readData[3];

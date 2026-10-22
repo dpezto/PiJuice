@@ -210,7 +210,8 @@ void RtcDs1339ProcessRequest(uint8_t dir, uint8_t command, uint8_t *pData, uint1
 			*dataLen = 7;
 		} else {
 			//testRegAdrW = pData[0]; // debug only
-			i = *dataLen;
+			// A raw write may carry up to 255 bytes; the register file holds 64.
+			i = *dataLen < RTC_REGISTERS_NUM ? *dataLen : RTC_REGISTERS_NUM;
 			while (i--) rtc_buffer[i] = pData[i];
 			RtcWriteTime(rtc_buffer, 0);
 		}

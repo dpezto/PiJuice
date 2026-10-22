@@ -538,11 +538,8 @@ __weak void InputSourcePresenceChangeCb(uint8_t event) {
 
 void ChargerTask(void) {
 	static int8_t currRegAdr;
+	int8_t failed = 0;
 	chargerNeedPoll = 0;
-	if (ChargerUpdateUSBInLockout() != 0) {
-		chargerNeedPoll = 1;
-		return;
-	}
 
 	if (chargerInterruptFlag) {
 		// update status on interrupt
@@ -551,27 +548,17 @@ void ChargerTask(void) {
 		chargerNeedPoll = 1;
 	}
 
-	if (ChargerUpdateControlStatus() != 0) {
-		chargerNeedPoll = 1;
-		return;
-	}
-
-	if (ChargerUpdateRegulationVoltage() != 0) {
-		chargerNeedPoll = 1;
-		return;
-	}
-
-	if (ChargerUpdateTempRegulationControlStatus() != 0) {
-		chargerNeedPoll = 1;
-		return;
-	}
-
-	if (ChargerUpdateChgCurrentAndTermCurrent() != 0) {
-		chargerNeedPoll = 1;
-		return;
-	}
-
-	if (ChargerUpdateVinDPM() != 0) {
+	// Every update runs even when an earlier write failed: the first failure
+	// used to return before the charge enable/disable decision, so a stuck
+	// lockout write could keep charging past tHot/tCold. Limits go before the
+	// enable decision, so charging is not enabled under the previous profile's.
+	failed |= ChargerUpdateUSBInLockout() != 0;
+	failed |= ChargerUpdateRegulationVoltage() != 0;
+	failed |= ChargerUpdateChgCurrentAndTermCurrent() != 0;
+	failed |= ChargerUpdateTempRegulationControlStatus() != 0;
+	failed |= ChargerUpdateControlStatus() != 0;
+	failed |= ChargerUpdateVinDPM() != 0;
+	if (failed) {
 		chargerNeedPoll = 1;
 		return;
 	}

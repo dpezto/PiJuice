@@ -1098,7 +1098,7 @@ void CmdServerReadBoardFaultStatus(uint8_t dir, uint8_t *pData, uint16_t *dataLe
 		// bit 0 charger i2c fault
 		pData[0] = (hi2c2.ErrorCode || chargerI2cErrorCounter) & 0x01;
 		// bit 1-3 charger fault status
-		pData[0] |= ((CHARGER_FAULT_STATUS()) << 1) & 0xE0;
+		pData[0] |= ((CHARGER_FAULT_STATUS()) << 1) & 0x0E; // & 0xE0 always dropped it
 		// bit 4 fuel gauge i2c fault
 		pData[0] |= FUEL_GAUGE_IC_FAULT_STATUS() << 4;
 		// bit 5 fuel gauge temp sense fault (bad sensor connection)

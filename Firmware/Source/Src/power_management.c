@@ -280,7 +280,7 @@ static void PowerManagementTask(void *argument) {
 		delayedTurnOnFlag = 0;
 	}
 
-	if ( delayedPowerOffCounter && delayedPowerOffCounter <= HAL_GetTick() ) {
+	if ( delayedPowerOffCounter && MS_TIME_REACHED(delayedPowerOffCounter) ) {
 		if (POW_5V_BOOST_EN_STATUS() && (pow5vInDetStatus != POW_5V_IN_DETECTION_STATUS_PRESENT)) {
 			Turn5vBoost(0);
 		}
@@ -343,7 +343,7 @@ void PowerManagementTask(void) {
 		MS_TIME_COUNTER_INIT(lastWakeupTimer);
 	}
 
-	if ( delayedPowerOffCounter && delayedPowerOffCounter <= HAL_GetTick() ) {
+	if ( delayedPowerOffCounter && MS_TIME_REACHED(delayedPowerOffCounter) ) {
 		if (POW_5V_BOOST_EN_STATUS() && (pow5vInDetStatus != POW_5V_IN_DETECTION_STATUS_PRESENT)) {
 			Turn5vBoost(0);
 		}
@@ -372,7 +372,7 @@ void PowerMngmtSchedulePowerOff(uint8_t dalayCode) {
 
 uint8_t PowerMngmtGetPowerOffCounter(void) {
 	if ( delayedPowerOffCounter ) {
-		if (delayedPowerOffCounter > HAL_GetTick()) {
+		if (!MS_TIME_REACHED(delayedPowerOffCounter)) {
 			return (delayedPowerOffCounter-HAL_GetTick()) >> 10;
 		} else {
 			return 0;

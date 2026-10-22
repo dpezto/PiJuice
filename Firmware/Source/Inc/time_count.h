@@ -17,6 +17,8 @@
 
 #define MS_TIME_COUNTER_INIT(c)	(c=HAL_GetTick())
 #define MS_TIME_COUNT(c)	(HAL_GetTick()-c)
+// Deadline d (a HAL_GetTick() value in the future) has passed; wrap-safe.
+#define MS_TIME_REACHED(d)	((int32_t)(HAL_GetTick() - (d)) >= 0)
 
 //extern uint32_t ticks[TIME_COUNTERS_MAX];
 
