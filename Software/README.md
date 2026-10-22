@@ -48,6 +48,22 @@ To remove PiJuice you'll need to run:
 Needs only `dpkg-deb`; the kernel module is built by DKMS on the target at
 install time.
 
+#### Releasing
+Versions are semver (`vX.Y.Z` tags) and come from Conventional Commits. On the
+development machine, with [git-cliff](https://git-cliff.org) installed:
+
+```bash
+./release.sh --dry-run   # next version, CHANGELOG and Debian entries
+./release.sh             # write them, commit chore(release) and tag; no push
+./release.sh 2.0.0       # explicit version
+```
+
+`feat` bumps the minor version, `fix`/`perf`/`refactor`/`docs`/`build`/`test`
+the patch, a breaking change (`feat!:` or `BREAKING CHANGE:`) the major;
+`chore`/`ci`/`style` are not released. Commits touching only GUI files go to
+`pijuice-gui`'s changelog, the rest to `pijuice-base`'s. Then build on the Pi
+with `pckg-pijuice.sh`, which checks both changelogs carry `__version__`.
+
 #### Supported systems
 
 Raspberry Pi OS Bookworm and Trixie, 64-bit and 32-bit (Pi Zero W included:

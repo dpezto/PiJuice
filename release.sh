@@ -28,6 +28,10 @@ $DRY || [ -z "$(git status --porcelain)" ] || die "working tree not clean"
 git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' > /dev/null 2>&1 \
 	|| die "no vX.Y.Z tag to release from"
 
+UNRELEASED=$(git cliff --unreleased 2> /dev/null) || die "git-cliff failed; run: git cliff --unreleased"
+grep -q '^- ' <<< "$UNRELEASED" \
+	|| die "nothing to release: no feat/fix/perf/refactor/docs/build/test commits since the last tag"
+
 VERSION=${1:-$(git cliff --bumped-version 2> /dev/null)}
 VERSION=${VERSION#v}
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "not a semver version: $VERSION"
@@ -62,8 +66,6 @@ EXCLUDE=() INCLUDE=()
 for path in "${GUI_PATHS[@]}"; do EXCLUDE+=(--exclude-path "$path"); INCLUDE+=(--include-path "$path"); done
 BASE_ENTRY=$(deb_entry pijuice-base low "${EXCLUDE[@]}")
 GUI_ENTRY=$(deb_entry pijuice-gui low "${INCLUDE[@]}")
-[ -n "$(git cliff --unreleased --tag "v$VERSION" 2> /dev/null | grep '^- ')" ] \
-	|| die "no feat/fix/perf/refactor/docs/build/test commits since the last tag"
 
 if $DRY; then
 	git cliff --unreleased --tag "v$VERSION" 2> /dev/null
@@ -77,7 +79,7 @@ prepend() {  # FILE TEXT
 	{ printf '%s\n\n' "$2"; cat "$1"; } > "$tmp"
 	mv "$tmp" "$1"
 }
-git cliff --unreleased --tag "v$VERSION" --prepend CHANGELOG.md 2> /dev/null
+prepend CHANGELOG.md "$(git cliff --unreleased --tag "v$VERSION" 2> /dev/null | sed '/./,$!d')"
 prepend "$SRC/debian-base/changelog" "$BASE_ENTRY"
 prepend "$SRC/debian-gui/changelog" "$GUI_ENTRY"
 sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" "$SRC/pijuice.py"
