@@ -58,8 +58,10 @@ deb_entry() {  # PKG URGENCY GIT-CLIFF-PATH-ARGS...
 	printf '%s (%s) unstable; urgency=%s\n\n%s\n\n -- %s  %s\n\n' "$pkg" "$VERSION" "$urgency" "$items" "$MAINT" "$DATE"
 }
 
-BASE_ENTRY=$(deb_entry pijuice-base low $(printf -- '--exclude-path %s ' "${GUI_PATHS[@]}"))
-GUI_ENTRY=$(deb_entry pijuice-gui low $(printf -- '--include-path %s ' "${GUI_PATHS[@]}"))
+EXCLUDE=() INCLUDE=()
+for path in "${GUI_PATHS[@]}"; do EXCLUDE+=(--exclude-path "$path"); INCLUDE+=(--include-path "$path"); done
+BASE_ENTRY=$(deb_entry pijuice-base low "${EXCLUDE[@]}")
+GUI_ENTRY=$(deb_entry pijuice-gui low "${INCLUDE[@]}")
 [ -n "$(git cliff --unreleased --tag "v$VERSION" 2> /dev/null | grep '^- ')" ] \
 	|| die "no feat/fix/perf/refactor/docs/build/test commits since the last tag"
 
