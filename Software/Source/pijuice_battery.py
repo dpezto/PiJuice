@@ -44,6 +44,29 @@ def profile_label(profile):
     return '%s · %s mAh' % match.groups() if match else profile
 
 
+def _write_json(path, data, mode):
+    """Atomic, durable replace: the rename itself is fsynced through the parent
+    directory, or a crash can bring back the old file (a lost charge-pause
+    marker would leave charging disabled and look manual)."""
+    parent = os.path.dirname(path) or '.'
+    fd, temporary = tempfile.mkstemp(prefix='.' + os.path.basename(path) + '-', dir=parent)
+    try:
+        with os.fdopen(fd, 'w') as file:
+            os.fchmod(file.fileno(), mode)
+            json.dump(data, file, allow_nan=False)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        directory = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _data(result):
     if result.get('error') != 'NO_ERROR':
         raise RuntimeError(result.get('error', 'Invalid device response'))
@@ -101,19 +124,8 @@ class ChargeLimiter:
             self.paused = False
 
     def _remember(self, paused):
-        parent = os.path.dirname(self.path)
-        fd, temporary = tempfile.mkstemp(prefix='.charge-limit-', dir=parent)
-        try:
-            with os.fdopen(fd, 'w') as file:
-                os.fchmod(file.fileno(), 0o640)
-                json.dump({'paused': paused}, file)
-                file.flush()
-                os.fsync(file.fileno())
-            os.replace(temporary, self.path)
-            self.paused = paused
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        _write_json(self.path, {'paused': paused}, 0o640)
+        self.paused = paused
 
     @staticmethod
     def _set(pj, enabled):
@@ -236,17 +248,7 @@ class BatteryHistory:
         if self.state is None:
             return
         self.state['updated'] = time.time() if now is None else now
-        fd, temporary = tempfile.mkstemp(prefix='.battery-history-', dir=os.path.dirname(self.path))
-        try:
-            with os.fdopen(fd, 'w') as file:
-                os.fchmod(file.fileno(), 0o644)
-                json.dump(self.state, file, allow_nan=False)
-                file.flush()
-                os.fsync(file.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        _write_json(self.path, self.state, 0o644)
 
     def sample(self, pj, reset_token=None):
         """A failed poll still breaks continuity; it must never bridge an outage."""

@@ -121,6 +121,13 @@ class BatteryTests(unittest.TestCase):
             with self.assertRaises(OSError): self.step()
         self.assertEqual(self.writes, [])
 
+    def test_pause_marker_rename_is_made_durable(self):
+        import pijuice_battery
+        with patch.object(pijuice_battery.os, 'fsync', wraps=pijuice_battery.os.fsync) as fsync:
+            self.step()
+        self.assertEqual(fsync.call_count, 2)  # the file, then its directory (the rename)
+        self.assertTrue(ChargeLimiter(self.path).paused)
+
     def test_no_battery_releases_owned_pause(self):
         self.step()
         self.battery['battery'] = 'NOT_PRESENT'
