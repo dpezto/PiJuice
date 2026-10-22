@@ -117,3 +117,6 @@ MANIFEST
 **/Backup/
 **/*.bak
 **/.~lock.*
+
+# Firmware build output
+Firmware/Source/build/
