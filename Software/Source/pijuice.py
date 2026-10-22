@@ -24,7 +24,7 @@ class PiJuiceInterface(object):
         """
         self.i2cbus = SMBus(bus)
         self.addr = address
-        self.t = None
+        self._lock = threading.Lock()  # self.cmd/self.d are shared per transfer
         self.comError = False
         self.errTime = 0
 
@@ -67,18 +67,20 @@ class PiJuiceInterface(object):
             self.errTime = time.time()
 
     def _DoTransfer(self, oper):
-        if (self.t != None and self.t.is_alive()) or (self.comError and (time.time()-self.errTime) < 4):
+        # ponytail: the transfer runs inline. It used to run on a new thread per
+        # transfer with a 0.1 s join, which cost ~3.3 ms CPU against ~0.2 ms for
+        # the transfer itself on a Pi Zero W (most of the daemon's CPU). A stuck
+        # bus now blocks the caller for the I2C adapter timeout instead; the
+        # daemon and the UIs' service worker already run off their UI threads.
+        if self.comError and (time.time()-self.errTime) < 4:
             return False
-
-        self.t = threading.Thread(target=oper, args=())
-        self.t.start()
-
-        # wait for transfer to finish or timeout
-        self.t.join(0.1)
-        if self.comError or self.t.is_alive():
-            return False
-
-        return True
+        if not self._lock.acquire(blocking=False):
+            return False  # another thread mid-transfer on this instance, as before
+        try:
+            oper()
+        finally:
+            self._lock.release()
+        return not self.comError
 
     def ReadData(self, cmd, length):
         d = []

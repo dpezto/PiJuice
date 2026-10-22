@@ -11,6 +11,9 @@ WorkingDirectory=/var/lib/pijuice/
 RuntimeDirectory=pijuice
 RuntimeDirectoryMode=0770
 RuntimeDirectoryPreserve=yes
+# Background work: yield the CPU to the Pi's real job. The checks need a few
+# ms every 5 s, which a niced process still gets on a busy single core.
+Nice=10
 ExecStart=/usr/bin/pijuice_sys.py
 ExecStopPost=/usr/bin/pijuice_sys.py stop
 Restart=always

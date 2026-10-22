@@ -15,8 +15,7 @@ import time
 import re
 
 from pijuice import PiJuice
-from pijuice_battery import ChargeLimiter, BatteryHistory
-from pijuice_service import rtc_fields_now
+from pijuice_battery import ChargeLimiter, BatteryHistory, rtc_fields_now
 
 
 
@@ -57,6 +56,7 @@ sysStopEvEn = False
 noPowCnt = 0  # 0 will trigger at boot without power, 3 will not trigger at boot without power
 PowCnt = 3    # 0 will trigger at boot with power, 3 will not trigger at boot with power
 dopoll = True
+buttonsEn = True  # a button event needs the 1 s status poll
 PID_FILE = '/run/pijuice/pijuice_sys.pid'
 HALT_FILE = '/run/pijuice/pijuice_halt.flag'
 I2C_ADDRESS_DEFAULT = 0x14
@@ -66,12 +66,45 @@ chargeLimitMessage = None
 batteryHistory = None
 batteryHistoryError = None
 
-def _TrackBattery():
+PROFILE_TTL_S = 300  # the battery profile only changes when a UI writes it
+_profile = None
+
+
+def _Value(result):
+    return result.get('data') if result.get('error') == 'NO_ERROR' else None
+
+
+def _ReadBattery(status):
+    """Each value read once per 5 s tick and shared by every consumer (it was
+    ~15 reads, several repeated). The near-static profile is re-read every
+    5 min or on SIGHUP. None marks a failed read."""
+    global _profile
+    now = time.monotonic()
+    if _profile is None or _profile['data'] is None or now - _profile['at'] >= PROFILE_TTL_S:
+        validity = _Value(pijuice.config.GetBatteryProfileStatus()) or {}
+        _profile = {'at': now, 'data': _Value(pijuice.config.GetBatteryProfile()),
+                    'valid': validity.get('validity') == 'VALID'}
+    get = pijuice.status
+    return {'charge': _Value(get.GetChargeLevel()), 'bat_mv': _Value(get.GetBatteryVoltage()),
+            'bat_ma': _Value(get.GetBatteryCurrent()), 'temp': _Value(get.GetBatteryTemperature()),
+            'io_mv': _Value(get.GetIoVoltage()), 'io_ma': _Value(get.GetIoCurrent()),
+            'faults': _Value(get.GetFaultStatus()) if status.get('isFault') else {},
+            'profile': _profile['data'], 'profile_valid': _profile['valid']}
+
+
+def _TrackBattery(status, reads):
     global batteryHistory, batteryHistoryError
     try:
         if batteryHistory is None:
             batteryHistory = BatteryHistory()
-        batteryHistory.sample(pijuice, configData.get("battery_tracking", {}).get("reset_token"))
+        try:
+            if reads['profile'] is None or not reads['profile_valid']:
+                raise ValueError('Battery profile is invalid or unreadable')
+            batteryHistory.observe(status, reads['profile'], reads['charge'], reads['io_mv'], reads['io_ma'],
+                                   reads['bat_mv'], reset_token=configData.get("battery_tracking", {}).get("reset_token"))
+        except Exception:
+            batteryHistory.interrupt()
+            raise
         batteryHistoryError = None
     except Exception as exc:
         message = str(exc)
@@ -80,12 +113,12 @@ def _TrackBattery():
             batteryHistoryError = message
 
 
-def _EvalChargeLimit(status):
+def _EvalChargeLimit(status, charge):
     global chargeLimiter, chargeLimitMessage
     try:
         if chargeLimiter is None:
             chargeLimiter = ChargeLimiter()
-        message = chargeLimiter.step(pijuice, configData.get('battery_management', {}), status)
+        message = chargeLimiter.step(pijuice, configData.get('battery_management', {}), status, charge)
     except Exception as exc:
         message = 'Charge limiter: ' + str(exc)
     if message != chargeLimitMessage:
@@ -252,15 +285,14 @@ def _Mains(status):
     return status.get('powerInput') == 'PRESENT' or status.get('powerInput5vIo') == 'PRESENT'
 
 
-def _EvalCharge(status):
+def _EvalCharge(status, charge):
     # The charge gauge is only trusted to fall while the battery is not charging:
     # on a WEAK input with CHARGING_FROM_* it may sit low while energy flows in.
     # The voltage check below still covers a weak charger losing the race.
     if status['battery'] != 'NORMAL' or _Mains(status):
         return True
-    charge = pijuice.status.GetChargeLevel()
-    if charge['error'] == 'NO_ERROR':
-        level = float(charge['data'])
+    if charge is not None:
+        level = float(charge)
         global chargeLevel
         th = _Threshold('min_charge')
         if level == 0 or ((level < th) and ((chargeLevel-level) >= 0 and (chargeLevel-level) < 3)):
@@ -275,12 +307,11 @@ def _EvalCharge(status):
         return False
 
 
-def _EvalBatVoltage(status):
+def _EvalBatVoltage(status, bat_mv):
     if status['battery'] == 'NOT_PRESENT' or _Mains(status):
         return True
-    bv = pijuice.status.GetBatteryVoltage()
-    if bv['error'] == 'NO_ERROR':
-        v = float(bv['data']) / 1000
+    if bat_mv is not None:
+        v = float(bat_mv) / 1000
         th = _Threshold('min_bat_voltage')
         if v < th and lowBatVolEn:
             ExecuteFunc(configData['system_events']['low_battery_voltage']['function'], 'low_battery_voltage', v,
@@ -311,10 +342,8 @@ def _EvalPowerInputs(status):
             ExecuteFunc(configData['system_events']['power']['function'],
                                    'power', '')
 
-def _EvalFaultFlags():
-    faults = pijuice.status.GetFaultStatus()
-    if faults['error'] == 'NO_ERROR':
-        faults = faults['data']
+def _EvalFaultFlags(faults):
+    if faults is not None:
         for f in (pijuice.status.faultEvents + pijuice.status.faults):
             if f in faults:
                 if sysEvEn and (f in configData['system_events']) and ('enabled' in configData['system_events'][f]) and configData['system_events'][f]['enabled']:
@@ -415,17 +444,24 @@ def _LoadConfiguration():
                 btConfig[b] = conf['data']
     except:
         pass
+    global buttonsEn
+    # Hardware functions run in the firmware and USER_EVENT is for other
+    # programs: only system/user functions need the 1 s poll.
+    buttonsEn = any(str((cfg or {}).get('function', '')).startswith(('SYS_FUNC', 'USER_FUNC'))
+                    for events in btConfig.values() for cfg in events.values())
 
 def reload_settings(signum=None, frame=None):
     _LoadConfiguration() # Update configuration
-    global _batCapacityMah
-    _batCapacityMah = None
+    global _profile
+    _profile = None  # a UI may have changed the battery profile
     global watchdogEn
     if watchdogEn: _ConfigureWatchdog('ACTIVATE') # Update watchdog setting
 
 _psWriteErrors = set()   # (attr, errno) already reported, so the journal isn't spammed
 _psMissingReported = False
-_batCapacityMah = None   # battery profile capacity, read once from the HAT
+_psLast = {}             # attr -> value last written; unchanged values are skipped
+_psRefreshAt = 0.0
+PS_REFRESH_S = 60        # rewrite everything this often, so a module reload is refilled
 _loadEmaMa = None        # smoothed discharge load for time_to_empty_now
 
 
@@ -442,16 +478,14 @@ def _TimeToEmpty(charge, capacity_mah):
     return int(seconds // 60 * 60)  # minute steps keep uevents quiet
 
 
-def _Health(status, temperature):
-    """Kernel health text from the HAT fault flags (one extra read only when flagged)."""
+def _Health(status, temperature, faults):
+    """Kernel health text from the HAT fault flags (read only when flagged)."""
     if status.get('battery') == 'NOT_PRESENT':
         return 'No battery'
     if not status.get('isFault'):
         return 'Good'
-    faults = pijuice.status.GetFaultStatus()
-    if faults.get('error') != 'NO_ERROR':
+    if faults is None:
         return 'Unknown'
-    faults = faults['data']
     if faults.get('battery_profile_invalid'):
         return 'Unspecified failure'
     thermal = faults.get('charging_temperature_fault', 'NORMAL')
@@ -461,9 +495,13 @@ def _Health(status, temperature):
 
 
 def _write_power_supply(attr, val):
+    val = str(val)
+    if _psLast.get(attr) == val:
+        return
     try:
         with open(os.path.join(POWER_SUPPLY_DIR, attr), 'w') as f:
-            f.write(str(val))
+            f.write(val)
+        _psLast[attr] = val
         _psWriteErrors.difference_update({k for k in _psWriteErrors if k[0] == attr})
     except OSError as e:
         if (attr, e.errno) not in _psWriteErrors:
@@ -471,33 +509,32 @@ def _write_power_supply(attr, val):
             log.error('pijuice_power: cannot write %s: %s', attr, e)
 
 
-def _UpdatePowerSupply(status):
-    # ponytail: called from the 5s poll block, not the 1s path, so the extra
-    # voltage/current/temp I2C reads stay cheap. Tighten if a UI lags.
-    global _psMissingReported, _batCapacityMah
+def _UpdatePowerSupply(status, reads):
+    """Feed the pijuice_power module from this tick's reads (no I2C here)."""
+    global _psMissingReported, _psRefreshAt
     if not os.path.isdir(POWER_SUPPLY_DIR):
         if not _psMissingReported:
             _psMissingReported = True
             log.warning('pijuice_power: %s missing, is the pijuice_power module loaded?', POWER_SUPPLY_DIR)
+        _psLast.clear()
         return
     if _psMissingReported:
         _psMissingReported = False
         log.info('pijuice_power: %s present again', POWER_SUPPLY_DIR)
-    if _batCapacityMah is None:
-        prof = pijuice.config.GetBatteryProfile()
-        if prof.get('error') == 'NO_ERROR' and isinstance(prof['data'].get('capacity'), int):
-            _batCapacityMah = prof['data']['capacity']
+    if time.monotonic() >= _psRefreshAt:
+        _psLast.clear()
+        _psRefreshAt = time.monotonic() + PS_REFRESH_S
+    design = (reads['profile'] or {}).get('capacity')
+    design = design if isinstance(design, int) and 0 < design < 0xffffffff else None
     learned = batteryHistory.capacity_mah() if batteryHistory is not None else None
-    full_mah = int(learned or _batCapacityMah or 0)
-    if _batCapacityMah:
-        # Written every poll (no I2C) so a module reload picks it up again; the
-        # module only raises a uevent when a value actually changes.
-        _write_power_supply('charge_full_design', _batCapacityMah * 1000)          # mAh -> uAh
+    full_mah = int(learned or design or 0)
+    if design:
+        _write_power_supply('charge_full_design', design * 1000)          # mAh -> uAh
         _write_power_supply('charge_full', full_mah * 1000)
     if batteryHistory is not None and batteryHistory.state:
         _write_power_supply('cycle_count', int(batteryHistory.state.get('cycles', 0)))
     bat = status.get('battery')
-    charge = pijuice.status.GetChargeLevel().get('data')
+    charge = reads['charge']
     _write_power_supply('time_to_empty_now', _TimeToEmpty(charge, full_mah))
     if bat == 'NOT_PRESENT':
         _write_power_supply('present', 0)
@@ -515,16 +552,12 @@ def _UpdatePowerSupply(status):
         _write_power_supply('status', st)
     if isinstance(charge, int):
         _write_power_supply('capacity', charge)
-    v = pijuice.status.GetBatteryVoltage().get('data')      # mV   -> uV
-    if isinstance(v, int):
-        _write_power_supply('voltage_now', v * 1000)
-    i = pijuice.status.GetBatteryCurrent().get('data')      # mA   -> uA
-    if isinstance(i, int):
-        _write_power_supply('current_now', i * 1000)
-    t = pijuice.status.GetBatteryTemperature().get('data')  # degC -> 0.1 degC
-    if isinstance(t, int):
-        _write_power_supply('temp', t * 10)
-    _write_power_supply('health', _Health(status, t))
+    for attr, key, scale in (('voltage_now', 'bat_mv', 1000),   # mV   -> uV
+                             ('current_now', 'bat_ma', 1000),   # mA   -> uA
+                             ('temp', 'temp', 10)):             # degC -> 0.1 degC
+        if isinstance(reads[key], int):
+            _write_power_supply(attr, reads[key] * scale)
+    _write_power_supply('health', _Health(status, reads['temp'], reads['faults']))
 
 
 def main():
@@ -644,30 +677,39 @@ def main():
         if time.monotonic() < _pausedUntil:
             time.sleep(1)
             continue
+        task = configData.get('system_task', {}).get('enabled')
+        if tick and not (task and buttonsEn):
+            # The 1 s status read only serves button functions; without any,
+            # stay off the bus between the 5 s checks.
+            tick = (tick + 1) % 5
+            time.sleep(1)
+            continue
         ret = pijuice.status.GetStatus()
         if ret['error'] != 'NO_ERROR':
             log.error('Status read failed: %s', ret['error'])
             time.sleep(1)
             continue
         status = ret['data']
-        task = configData.get('system_task', {}).get('enabled')
         if task and status['isButton']:
             _EvalButtonEvents()
         if tick == 0:
-            # Every 5 s. Battery tracking, the charge limit and the power_supply
-            # feed run regardless of the System Task switch.
-            _TrackBattery()
-            _EvalChargeLimit(status)
-            _UpdatePowerSupply(status)
+            # Every 5 s, one read of each value for all consumers. Safety
+            # checks first, before anything that may write to the SD card.
+            # Battery tracking, the charge limit and the power_supply feed run
+            # regardless of the System Task switch.
+            reads = _ReadBattery(status)
             if task:
                 if status.get('isFault'):
-                    _EvalFaultFlags()
+                    _EvalFaultFlags(reads['faults'])
                 if minChgEn:
-                    _EvalCharge(status)
+                    _EvalCharge(status, reads['charge'])
                 if minBatVolEn:
-                    _EvalBatVoltage(status)
+                    _EvalBatVoltage(status, reads['bat_mv'])
                 if noPowEn or PowEn:
                     _EvalPowerInputs(status)
+            _TrackBattery(status, reads)
+            _EvalChargeLimit(status, reads['charge'])
+            _UpdatePowerSupply(status, reads)
         tick = (tick + 1) % 5
         time.sleep(1)
 

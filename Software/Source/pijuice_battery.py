@@ -34,6 +34,15 @@ def charge_policy(config):
     return policy
 
 
+def rtc_fields_now():
+    """Current UTC time in the layout ``rtcAlarm.SetTime`` expects. Lives here,
+    not in pijuice_service, so the daemon need not import the UI service layer."""
+    t = datetime.datetime.now(datetime.timezone.utc)
+    fields = {key: getattr(t, key) for key in ('second', 'minute', 'hour', 'day', 'month', 'year')}
+    fields.update(weekday=(t.weekday() + 1) % 7 + 1, subsecond=0)
+    return fields
+
+
 def profile_label(profile):
     if profile == 'DEFAULT':
         return 'Automatic (board selector)'
@@ -138,7 +147,8 @@ class ChargeLimiter:
             self._set(pj, True)
             self._remember(False)
 
-    def step(self, pj, config, status):
+    def step(self, pj, config, status, charge=None):
+        """*charge*: the daemon's reading for this tick, read here if absent."""
         policy = charge_policy(config)
         if not policy['enabled']:
             self.release(pj)
@@ -148,7 +158,8 @@ class ChargeLimiter:
         if status['battery'] == 'NOT_PRESENT':
             self.release(pj)
             return 'No battery detected'
-        charge = _data(pj.status.GetChargeLevel())
+        if charge is None:
+            charge = _data(pj.status.GetChargeLevel())
         if isinstance(charge, bool) or not isinstance(charge, (int, float)) or not math.isfinite(charge) or not 0 <= charge <= 100:
             raise ValueError('Battery charge unavailable')
         enabled = _data(pj.config.GetChargingConfig()).get('charging_enabled')
@@ -317,23 +328,12 @@ class BatteryHistory:
             self.state['last_estimate'] = now
             self.pending = True
 
-    def sample(self, pj, reset_token=None):
+    def interrupt(self):
         """A failed poll still breaks continuity; it must never bridge an outage."""
-        try:
-            status = _data(pj.status.GetStatus())
-            profile = _data(pj.config.GetBatteryProfile())
-            validity = _data(pj.config.GetBatteryProfileStatus())
-            if validity.get('validity') != 'VALID':
-                raise ValueError('Battery profile is invalid')
-            self.observe(status, profile, _data(pj.status.GetChargeLevel()),
-                         _data(pj.status.GetIoVoltage()), _data(pj.status.GetIoCurrent()),
-                         _data(pj.status.GetBatteryVoltage()), reset_token=reset_token)
-        except Exception:
-            self._end_run(time.time())
-            self.previous = self.floor = None
-            if self.state is not None:
-                self.state['status'] = 'Waiting for valid battery readings'
-            raise
+        self._end_run(time.time())
+        self.previous = self.floor = None
+        if self.state is not None:
+            self.state['status'] = 'Waiting for valid battery readings'
 
     def observe(self, status, profile, soc, io_mv, io_ma, bat_mv,
                 now=None, monotonic=None, reset_token=None):

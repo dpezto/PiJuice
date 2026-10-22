@@ -23,7 +23,7 @@ Toolkit independence: :meth:`PiJuiceService.submit` returns a
 about neither.
 """
 
-from pijuice_battery import battery_report, charge_policy
+from pijuice_battery import battery_report, charge_policy, rtc_fields_now  # noqa: F401 - re-exported for the UIs
 
 import copy
 import json
@@ -276,15 +276,6 @@ def alarm_fields(alarm):
         fields['minute'] = str(minute)
     if 'second' in alarm:
         fields['second'] = str(alarm['second'])
-    return fields
-
-
-def rtc_fields_now():
-    """Current UTC time in the layout ``rtcAlarm.SetTime`` expects."""
-    import datetime
-    t = datetime.datetime.now(datetime.timezone.utc)
-    fields = {key: getattr(t, key) for key in ('second', 'minute', 'hour', 'day', 'month', 'year')}
-    fields.update(weekday=(t.weekday() + 1) % 7 + 1, subsecond=0)
     return fields
 
 

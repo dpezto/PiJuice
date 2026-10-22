@@ -118,9 +118,7 @@ class HistoryTests(unittest.TestCase):
     def test_sensor_failure_breaks_session(self):
         self.sample(80)
         self.sample(79)
-        pj = Mock()
-        pj.status.GetStatus.return_value = {'error': 'NO_CONNECTION'}
-        with self.assertRaises(RuntimeError): self.history.sample(pj)
+        self.history.interrupt()  # the daemon's read failed
         self.assertIsNone(self.history.run)
         self.sample(20)
         self.assertAlmostEqual(self.history.state['cycles'], .01)
