@@ -7,7 +7,6 @@ release a pause without overriding charging that was already disabled manually.
 """
 import json
 import datetime
-import statistics
 import time
 import math
 import os
@@ -170,11 +169,35 @@ class ChargeLimiter:
 
 
 HISTORY_PATH = '/var/lib/pijuice/battery_history.json'
+SESSION_GAP_S = 30        # a longer silence ends a session as interrupted
+QUALIFY_SPAN = 50         # points of one continuous discharge for a capacity estimate
+SAVE_ON_BATTERY_S = 300   # SD writes: bound what a brown-out loses while on battery,
+SAVE_IDLE_S = 1800        # and stay off the card on mains
+ACTIVE_S = SAVE_IDLE_S + 600
 
 
 def _number(value, low, high):
     return (not isinstance(value, bool) and isinstance(value, (int, float))
             and math.isfinite(value) and low <= value <= high)
+
+
+def _median(values):
+    values = sorted(values)
+    return (values[len(values) // 2] + values[~len(values) // 2]) / 2 if values else None
+
+
+def _clock(ts, fmt='%Y-%m-%d %H:%M'):
+    return datetime.datetime.fromtimestamp(ts).strftime(fmt)
+
+
+def session_text(s):
+    """One line per discharge session, for both UIs and ``pijuice_cli --status``."""
+    minutes = (s['end'] - s['start']) / 60
+    same_day = _clock(s['start'], '%Y-%m-%d') == _clock(s['end'], '%Y-%m-%d')
+    load = ', avg %.0f mA' % s['avg_ma'] if s.get('avg_ma') else ''
+    return '%s → %s (%dh%02d), %.0f%% → %.0f%%%s; ended: %s' % (
+        _clock(s['start']), _clock(s['end'], '%H:%M' if same_day else '%Y-%m-%d %H:%M'),
+        minutes // 60, minutes % 60, s['start_soc'], s['end_soc'], load, s['reason'])
 
 
 def history_report(path=HISTORY_PATH):
@@ -185,39 +208,50 @@ def history_report(path=HISTORY_PATH):
         if state.get('version') != 1:
             raise ValueError('Unrecognised history format')
         samples = state['samples']
-        capacity = statistics.median(s['capacity_mah'] for s in samples) if samples else None
+        capacity = _median(s['capacity_mah'] for s in samples)
         design = state.get('design_capacity')
         health = capacity / design * 100 if capacity and design else None
         updated = state.get('updated', 0)
-        active = 0 <= time.time() - updated <= 180
-        since = datetime.datetime.fromtimestamp(state['started'], datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-        lines = ['Equivalent cycles: %.2f estimated since %s' % (state['cycles'], since),
+        active = 0 <= time.time() - updated <= ACTIVE_S
+        sessions = state.get('sessions', [])
+        lines = ['Equivalent cycles: %.2f estimated since %s' % (state['cycles'], _clock(state['started'])),
                  ('Capacity health: ~%.0f%% (~%.0f mAh; %d qualifying discharge%s)' %
                   (health, capacity, len(samples), '' if len(samples) == 1 else 's')) if health is not None
-                 else 'Capacity health: learning — needs an uninterrupted discharge from at least 80% to 20%.',
-                 'Tracking: ' + (state.get('status', 'Collecting readings') if active else 'Paused — background service has not updated recently.'),
-                 'Cycles cover observed use only. Health is a rough output-load estimate using 90% conversion efficiency; charge-gauge and load errors affect it.']
+                 else 'Capacity health: learning — needs one uninterrupted discharge of %d points or more (e.g. 75%% → 25%%).' % QUALIFY_SPAN,
+                 'Tracking: ' + (state.get('status', 'Collecting readings') if active else 'Paused — background service has not updated recently.')]
+        open_session = state.get('session')
+        if open_session and active:
+            lines.append('On battery since %s (%.0f%% → %.0f%% at last save)' % (
+                _clock(open_session['start']), open_session['start_soc'], open_session['end_soc']))
+        if sessions:
+            lines.append('Recent battery sessions:')
+            lines.extend('  ' + session_text(s) for s in reversed(sessions[-3:]))
+        lines.append('Cycles cover observed use only. Health is a rough output-load estimate using 90% conversion efficiency; charge-gauge and load errors affect it.')
         if state.get('last_estimate'):
-            lines.append('Last capacity estimate: ' + datetime.datetime.fromtimestamp(state['last_estimate'], datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC'))
+            lines.append('Last capacity estimate: ' + _clock(state['last_estimate']))
         return {'cycles': state['cycles'], 'capacity_mah': capacity, 'health_percent': health,
                 'samples': len(samples), 'started': state['started'], 'active': active,
-                'text': '\n'.join(lines)}
+                'sessions': sessions, 'session': open_session, 'text': '\n'.join(lines)}
     except FileNotFoundError:
         message = 'Battery history: waiting for the background service to start tracking.'
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         message = 'Battery history unavailable — check the background service log.'
     return {'cycles': None, 'capacity_mah': None, 'health_percent': None,
-            'samples': 0, 'active': False, 'text': message}
+            'samples': 0, 'active': False, 'sessions': [], 'session': None, 'text': message}
 
 
 class BatteryHistory:
-    """Persist observed cycles and independent load-based capacity estimates.
+    """Persist observed cycles, discharge sessions and load-based capacity estimates.
 
     Never integrate firmware battery current: it may be derived from RSoC and
     configured capacity. GPIO load current is independently sensed. Capacity
     extrapolates delivered charge / observed SOC fraction / assumed efficiency.
     This is explicitly a rough estimate, not a laboratory capacity measurement.
     Missing samples, restarts, charging and profile changes break health runs.
+
+    A session is one stretch on battery: start/end time, charge at each end,
+    average battery-side load and why it ended (power, no battery, a halt or
+    service stop, or ``interrupted`` when the readings simply stopped).
     """
     def __init__(self, path=HISTORY_PATH):
         self.path = path
@@ -233,6 +267,7 @@ class BatteryHistory:
         self.run = None
         self.floor = None
         self.last_save = None
+        self.pending = False  # a session/estimate changed: write at the next observe
 
     def load_ma(self):
         """Last battery-side load (mA) while discharging on valid readings, else None."""
@@ -241,14 +276,46 @@ class BatteryHistory:
 
     def capacity_mah(self):
         """Median learned full capacity, or None until a session qualifies."""
-        samples = (self.state or {}).get('samples') or []
-        return statistics.median(s['capacity_mah'] for s in samples) if samples else None
+        return _median(s['capacity_mah'] for s in (self.state or {}).get('samples') or [])
 
     def save(self, now=None):
         if self.state is None:
             return
         self.state['updated'] = time.time() if now is None else now
         _write_json(self.path, self.state, 0o644)
+
+    def close_session(self, reason, end=None):
+        """End the open session (if any); the daemon calls this on stop."""
+        session = (self.state or {}).get('session')
+        self._end_run(time.time() if end is None else end)
+        if not session:
+            return
+        hours = session.get('hours', 0)
+        self.state['sessions'] = (self.state.get('sessions', []) + [{
+            'start': session['start'], 'end': session['last'] if end is None else end,
+            'start_soc': session['start_soc'], 'end_soc': session['end_soc'],
+            'mah': round(session['mah'], 1), 'avg_ma': round(session['mah'] / hours) if hours else None,
+            'reason': reason}])[-20:]
+        self.state['session'] = None
+        self.pending = True
+
+    def _end_run(self, now):
+        """Close the capacity run; it qualifies on span, wherever it started."""
+        run, self.run = self.run, None
+        if not run or self.state is None:
+            return
+        span = run['start_soc'] - run['last_soc']
+        if span < QUALIFY_SPAN:
+            return
+        capacity = run['mah'] * 100 / span
+        design = self.state['design_capacity']
+        # Reject impossible/outlier sessions, don't clamp them to 100% and
+        # conceal an invalid load/profile/calibration.
+        if 0.1 * design <= capacity <= 1.5 * design:
+            self.state['samples'] = (self.state['samples'] +
+                [{'capacity_mah': capacity, 'at': now, 'soc_span': span}])[-5:]
+            self.state['last_estimate'] = now
+            self.pending = True
 
     def sample(self, pj, reset_token=None):
         """A failed poll still breaks continuity; it must never bridge an outage."""
@@ -262,7 +329,8 @@ class BatteryHistory:
                          _data(pj.status.GetIoVoltage()), _data(pj.status.GetIoCurrent()),
                          _data(pj.status.GetBatteryVoltage()), reset_token=reset_token)
         except Exception:
-            self.previous = self.run = self.floor = None
+            self._end_run(time.time())
+            self.previous = self.floor = None
             if self.state is not None:
                 self.state['status'] = 'Waiting for valid battery readings'
             raise
@@ -273,17 +341,21 @@ class BatteryHistory:
         tick = time.monotonic() if monotonic is None else monotonic
         design = profile.get('capacity')
         if not _number(design, 1, 1000000) or not _number(soc, 0, 100):
-            self.previous = self.run = self.floor = None
+            self._end_run(now)
+            self.previous = self.floor = None
             raise ValueError('Invalid charge or design capacity')
         signature = json.dumps(profile, sort_keys=True)
         changed = (self.state is None or self.state.get('profile') != signature
                    or self.state.get('reset_token') != reset_token)
         if changed:
+            if self.state is not None:
+                self.close_session('battery changed', now)
             archives = [] if self.state is None else (self.state.get('archives', []) +
-                         [{k: v for k, v in self.state.items() if k != 'archives'}])[-10:]
+                         [dict({k: v for k, v in self.state.items() if k != 'archives'},
+                               sessions=self.state.get('sessions', [])[-5:])])[-10:]
             self.state = {'version': 1, 'started': now, 'updated': now, 'profile': signature,
                           'design_capacity': design, 'reset_token': reset_token, 'cycles': 0.0,
-                          'samples': [], 'archives': archives}
+                          'samples': [], 'sessions': [], 'session': None, 'archives': archives}
             self.previous = self.run = self.floor = None
         discharging = (status.get('battery') == 'NORMAL'
                        and status.get('powerInput') == 'NOT_PRESENT'
@@ -292,11 +364,11 @@ class BatteryHistory:
                       and _number(bat_mv, 2000, 4600))
         prev = self.previous
         dt = tick - prev['tick'] if prev else 0
-        continuous = prev is not None and 0 < dt <= 30 and prev['discharging'] and discharging
+        continuous = prev is not None and 0 < dt <= SESSION_GAP_S and prev['discharging'] and discharging
         # An abrupt gauge correction must not count as battery wear.
         plausible = continuous and -2 <= prev['soc'] - soc <= 2
         if not plausible:
-            self.run = None
+            self._end_run(now)
             self.floor = soc if discharging else None
         elif self.floor is not None:
             if soc < self.floor:
@@ -305,33 +377,48 @@ class BatteryHistory:
             # A sustained rise denotes a correction or missed recharge. Don't
             # count a subsequent fall through the same charge range twice.
             if soc > self.floor + 2:
-                self.run = None
+                self._end_run(now)
         effective_ma = io_mv * io_ma / bat_mv / 0.90 if valid_load else None
+        integrable = continuous and effective_ma is not None and prev.get('effective_ma') is not None
         if not discharging or not valid_load:
-            self.run = None
-        elif self.run and plausible and prev.get('effective_ma') is not None:
+            self._end_run(now)
+        elif self.run and plausible and integrable:
             if soc > self.run['last_soc'] + 2:
-                self.run = None
+                self._end_run(now)
             else:
                 self.run['mah'] += (effective_ma + prev['effective_ma']) / 2 * dt / 3600
                 self.run['last_soc'] = min(soc, self.run['last_soc'])
-                span = self.run['start_soc'] - soc
-                if soc <= 20 and span >= 60:
-                    capacity = self.run['mah'] * 100 / span
-                    # Reject impossible/outlier sessions, don't clamp them to
-                    # 100% and conceal an invalid load/profile/calibration.
-                    if 0.1 * design <= capacity <= 1.5 * design:
-                        self.state['samples'] = (self.state['samples'] +
-                            [{'capacity_mah': capacity, 'at': now, 'soc_span': span}])[-5:]
-                        self.state['last_estimate'] = now
-                    self.run = None
-        if self.run is None and discharging and valid_load and soc >= 80:
+        if self.run is None and discharging and valid_load:
             self.run = {'start_soc': soc, 'last_soc': soc, 'mah': 0.0}
+        self._track_session(status, discharging, soc, now, dt if integrable else 0,
+                            (effective_ma + prev['effective_ma']) / 2 if integrable else 0)
         self.state['status'] = ('No battery detected' if status.get('battery') == 'NOT_PRESENT' else
                                 'Recording discharge (%.0f%% → %.0f%%)' % (self.run['start_soc'], soc) if self.run else
-                                'Counting cycles; waiting for an 80% → 20% discharge' if discharging else
+                                'On battery; load reading unavailable' if discharging else
                                 'Monitoring — waiting for battery use')
         self.previous = {'tick': tick, 'soc': soc, 'discharging': discharging, 'effective_ma': effective_ma}
-        if changed or self.last_save is None or tick - self.last_save >= 60:
+        due = SAVE_ON_BATTERY_S if self.state.get('session') else SAVE_IDLE_S
+        if changed or self.pending or self.last_save is None or tick - self.last_save >= due:
             self.save(now)
             self.last_save = tick
+            self.pending = False
+
+    def _track_session(self, status, discharging, soc, now, dt, load_ma):
+        session = self.state.get('session')
+        if session and now - session['last'] > SESSION_GAP_S:
+            self.close_session('interrupted')  # crash, brown-out or reboot: end at the last reading
+            session = None
+        if session and not discharging:
+            self.close_session('no battery' if status.get('battery') == 'NOT_PRESENT' else 'power', now)
+            session = None
+        if not discharging:
+            return
+        if session is None:
+            self.state['session'] = {'start': now, 'start_soc': soc, 'end_soc': soc, 'last': now,
+                                     'mah': 0.0, 'hours': 0.0}
+            self.pending = True
+            return
+        session['mah'] += load_ma * dt / 3600
+        session['hours'] += dt / 3600
+        session['end_soc'] = soc
+        session['last'] = now

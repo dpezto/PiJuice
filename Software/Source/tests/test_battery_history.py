@@ -32,6 +32,7 @@ class HistoryTests(unittest.TestCase):
         # 750mA battery-side estimate for 0.8h = 600mAh over 60%.
         for t in range(0, 2881, 5):
             self.sample(80 - 60 * t / 2880)
+        self.sample(20, POWERED)  # a run is judged when it ends
 
     def test_partial_cycles_accumulate_without_counting_recharge(self):
         for start in (80, 75):
@@ -54,6 +55,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_realistic_capacity_loss_is_not_clamped_or_hidden(self):
         for t in range(0, 2161, 5): self.sample(80 - 60 * t / 2160)
+        self.history.close_session('service stopped')
         self.assertAlmostEqual(self.history.state['samples'][0]['capacity_mah'], 750)
 
     def test_reboot_preserves_totals_but_never_integrates_downtime(self):
@@ -142,10 +144,58 @@ class HistoryTests(unittest.TestCase):
 
     def test_write_frequency_is_bounded_and_snapshot_readable(self):
         with patch.object(self.history, 'save', wraps=self.history.save) as save:
-            for i in range(30): self.sample(80)
-        self.assertEqual(save.call_count, 3)
+            for i in range(30): self.sample(80)          # 150 s on battery: only the session start
+            self.assertEqual(save.call_count, 1)
+            for i in range(60): self.sample(80)          # crosses 300 s
+            self.assertEqual(save.call_count, 2)
+            self.sample(80, POWERED)                     # session end is written at once
+            self.assertEqual(save.call_count, 3)
+            for i in range(300): self.sample(80, POWERED)  # 25 min idle on mains: nothing
+            self.assertEqual(save.call_count, 3)
         self.assertEqual(Path(self.path).stat().st_mode & 0o777, 0o644)
         self.assertEqual(json.loads(Path(self.path).read_text())['version'], 1)
+
+    def test_session_below_the_charge_limit_qualifies(self):
+        # typhon: the 80% limit means discharges start at 75-80%, so the old
+        # >=80% -> <=20% rule never matched. 75% -> 20% is 55 points.
+        for t in range(0, 2641, 5): self.sample(75 - 55 * t / 2640)
+        self.sample(20, POWERED)
+        self.assertEqual(len(self.history.state['samples']), 1)
+        self.assertAlmostEqual(self.history.state['samples'][0]['capacity_mah'], 1000)
+
+    def test_short_discharge_records_a_session_but_no_estimate(self):
+        start = 1700000000 + self.tick + 20
+        for soc in range(80, 59, -1): self.sample(soc, step=20)
+        self.sample(60, POWERED, step=20)
+        self.assertEqual(self.history.state['samples'], [])
+        session, = self.history.state['sessions']
+        self.assertEqual((session['start'], session['start_soc'], session['end_soc'], session['reason']),
+                         (start, 80, 60, 'power'))
+        self.assertEqual(session['end'] - session['start'], 21 * 20)  # ends when power is seen
+        self.assertAlmostEqual(session['avg_ma'], 750, delta=1)
+        self.assertIsNone(self.history.state['session'])
+
+    def test_stop_and_lost_readings_close_sessions_with_a_reason(self):
+        for soc in (80, 79, 78): self.sample(soc)
+        self.history.close_session('halt (low_battery_voltage)')
+        self.assertEqual(self.history.state['sessions'][-1]['reason'], 'halt (low_battery_voltage)')
+        for soc in (70, 69): self.sample(soc)
+        last = self.history.state['session']['last']
+        self.history.save()
+        self.history = BatteryHistory(self.path)     # daemon died without closing it
+        self.sample(90, POWERED, step=3600)
+        self.assertEqual(self.history.state['sessions'][-1]['reason'], 'interrupted')
+        self.assertEqual(self.history.state['sessions'][-1]['end'], last)
+
+    def test_report_shows_sessions(self):
+        for soc in range(80, 69, -1): self.sample(soc, step=20)
+        self.sample(70, POWERED)
+        self.history.save(1700000000 + self.tick)
+        with patch('pijuice_battery.time.time', return_value=1700000000 + self.tick):
+            report = history_report(self.path)
+        self.assertEqual(len(report['sessions']), 1)
+        self.assertIn('80% → 70%', report['text'])
+        self.assertIn('ended: power', report['text'])
 
 
 if __name__ == '__main__': unittest.main()

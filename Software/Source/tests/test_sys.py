@@ -92,13 +92,13 @@ class LowEnergyTests(unittest.TestCase):
     def setUp(self):
         self.pj = Mock()
         daemon.pijuice = self.pj
-        daemon._halting = False
+        daemon._halting = None
         daemon.chargeLevel = 50
         daemon.lowChgEn = daemon.lowBatVolEn = True
         daemon.configData = {'system_task': {'enabled': True},
                              'system_events': {e: {'enabled': True, 'function': 'SYS_FUNC_HALT'}
                                                for e in ('low_charge', 'low_battery_voltage')}}
-        self.halt = daemon._SystemHalt = Mock(side_effect=lambda ev: setattr(daemon, '_halting', True))
+        self.halt = daemon._SystemHalt = Mock(side_effect=lambda ev: setattr(daemon, '_halting', ev))
         self.addCleanup(setattr, daemon, '_SystemHalt', ORIGINAL_HALT)
 
     def test_missing_check_gets_the_default_threshold(self):

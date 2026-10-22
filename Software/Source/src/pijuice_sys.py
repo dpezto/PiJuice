@@ -136,12 +136,12 @@ def _RestoreWakeup():
             log.error('Could not arm wakeup on charge: %s', ret.get('error'))
 
 
-_halting = False
+_halting = None  # the event that halted the system, for the battery session record
 
 
 def _SystemHalt(event):
     global _halting
-    _halting = True
+    _halting = event or 'halt'
     if (event in ('low_charge', 'low_battery_voltage', 'no_power')
         and configData.get('system_task', {}).get('wakeup_on_charge', {}).get('enabled', False)
         and 'trigger_level' in configData['system_task']['wakeup_on_charge']):
@@ -671,6 +671,7 @@ def main():
         time.sleep(1)
 
     if batteryHistory is not None:
+        batteryHistory.close_session('halt (%s)' % _halting if _halting else 'service stopped')
         batteryHistory.save()
 
 
