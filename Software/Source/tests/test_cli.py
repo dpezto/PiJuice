@@ -494,4 +494,40 @@ class CliTests(unittest.TestCase):
         self.assertTrue(cli._dirty)
 
 
+class NonInteractiveTests(unittest.TestCase):
+    SCRIPT = str(Path(cli.__file__))
+
+    def run_cli(self, *args):
+        import os, subprocess
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+        return subprocess.run([sys.executable, self.SCRIPT, *args], stdin=subprocess.PIPE,
+                              capture_output=True, text=True, timeout=30, env=env)
+
+    def test_no_terminal_exits_with_a_hint_instead_of_hanging(self):
+        run = self.run_cli()  # ssh typhon pijuice_cli
+        self.assertEqual(run.returncode, 2)
+        self.assertIn('--status', run.stderr)
+
+    def test_unknown_option_prints_usage(self):
+        self.assertEqual(self.run_cli('--bogus').returncode, 2)
+
+    def test_status_report_text_and_json(self):
+        svc = Mock()
+        svc.config = {'system_task': {'enabled': False},
+                      'system_events': {'low_charge': {'enabled': True, 'function': 'SYS_FUNC_HALT'}}}
+        svc.get_battery_report.return_value = {
+            'status': {'battery': 'NORMAL', 'powerInput': 'WEAK', 'powerInput5vIo': 'NOT_PRESENT'},
+            'charge': 41, 'voltage': 3790, 'temperature': None, 'condition': 'No battery faults reported',
+            'policy': {'enabled': True, 'limit': 80, 'resume': 75}, 'health': 'Recent battery sessions:'}
+        svc.get_io_voltage.return_value, svc.get_io_current.return_value = 5020, 1465
+        report = cli.status_report(svc)
+        text = cli.status_text(report)
+        self.assertIn('Battery: 41% · 3790 mV · On battery · ?', text)
+        self.assertIn('Power input: Weak', text)
+        self.assertIn('load 1465 mA', text)
+        self.assertIn('pause 80%, resume 75%', text)
+        self.assertIn('! Low charge will never fire', text)
+        self.assertEqual(json.loads(json.dumps(report, default=str))['io_current_ma'], 1465)
+
+
 if __name__ == '__main__': unittest.main()

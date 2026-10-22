@@ -7,6 +7,7 @@ import copy
 import datetime
 import fcntl
 import glob
+import json
 import os
 import re
 import sys
@@ -3827,10 +3828,68 @@ def _build_and_run():
     loop.run()
 
 
+def status_report(svc):
+    """Battery/power snapshot for ``--status`` / ``--json`` (no TUI, no lock)."""
+    report = svc.get_battery_report()
+    report["io_voltage_mv"], report["io_current_ma"] = svc.get_io_voltage(), svc.get_io_current()
+    report["warnings"] = low_energy_warnings(svc.config)
+    return report
+
+
+def status_text(report):
+    status, policy = report.get("status") or {}, report.get("policy") or {}
+    value = lambda key, fmt: fmt % report[key] if report.get(key) is not None else "?"
+    lines = [
+        "Battery: %s · %s · %s · %s" % (value("charge", "%s%%"), value("voltage", "%s mV"),
+                                         readable(status.get("battery", "UNKNOWN")), value("temperature", "%s °C")),
+        "Power input: %s · 5V GPIO: %s · load %s at %s" % (
+            readable(status.get("powerInput", "UNKNOWN")), readable(status.get("powerInput5vIo", "UNKNOWN")),
+            value("io_current_ma", "%s mA"), value("io_voltage_mv", "%s mV")),
+        "Condition: %s" % report.get("condition", "?"),
+        "Charge limit: " + ("on (pause %s%%, resume %s%%)" % (policy.get("limit"), policy.get("resume"))
+                            if policy.get("enabled") else "off"),
+        report.get("health", ""),
+    ]
+    return "\n".join(lines + ["! " + w for w in report.get("warnings", [])])
+
+
+def _print_status(as_json):
+    svc = PiJuiceService(config_path=PiJuiceConfigDataPath, pid_file=PID_FILE)
+    try:
+        report = status_report(svc)
+    except Exception as exc:
+        sys.stderr.write("pijuice_cli: cannot read the HAT: %s\n" % exc)
+        return 1
+    finally:
+        svc.close()
+    print(json.dumps(report, indent=2, default=str, ensure_ascii=False) if as_json else status_text(report))
+    return 0
+
+
+USAGE = """usage: pijuice_cli [--status | --json]
+
+With no option, opens the interactive menu (needs a terminal: ssh -t host pijuice_cli).
+  --status   print battery, power and battery-history status, then exit
+  --json     the same as JSON, for scripts
+"""
+
+
 # Importing the module must not launch the TUI or grab the lock -- only running
 # it as a script does.
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
         sys.exit(0)
+    if {"-h", "--help"} & set(sys.argv[1:]):
+        print(USAGE, end="")
+        sys.exit(0)
+    if {"--status", "--json"} & set(sys.argv[1:]):
+        sys.exit(_print_status("--json" in sys.argv))
+    if sys.argv[1:]:
+        sys.stderr.write(USAGE)
+        sys.exit(2)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # urwid would wait forever on a pipe (ssh host pijuice_cli)
+        sys.stderr.write("pijuice_cli: no terminal. Use 'ssh -t' for the menu, or --status / --json.\n")
+        sys.exit(2)
     _build_and_run()
