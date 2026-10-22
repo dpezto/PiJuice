@@ -1,8 +1,8 @@
-pijuice-gui (1.11) unstable; urgency=low
+pijuice-gui (1.11.0) unstable; urgency=low
 
   * pijuice_gtk: low-battery shutdown warnings on System Task / System
     Events, battery sessions on the Battery page, script-name-only edits
-    expose Apply. Needs pijuice-base >= 1.11 (low_energy_warnings).
+    expose Apply. Needs pijuice-base >= 1.11.0 (low_energy_warnings).
 
  -- Dai López <dpezto@gmail.com>  Wed, 21 Oct 2026 22:12:54 -0600
 

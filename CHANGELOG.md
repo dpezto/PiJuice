@@ -1,4 +1,4 @@
-## Version 1.11
+## Version 1.11.0
 
 ### Software
 pijuice-base; urgency=medium

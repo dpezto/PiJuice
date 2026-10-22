@@ -1,4 +1,4 @@
-pijuice-base (1.11) unstable; urgency=medium
+pijuice-base (1.11.0) unstable; urgency=medium
 
   * pijuice_sys: an enabled low-charge/low-voltage event with no System Task
     check guards at 10 % / 3.3 V instead of never firing; a WEAK input keeps
